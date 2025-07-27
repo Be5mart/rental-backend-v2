@@ -1,7 +1,3 @@
-# TODO: As project grows, move routes to routes/ folder
-# TODO: Move database config to config/ folder
-# etc.
-
 from flask import Flask, request, jsonify
 import time
 import json

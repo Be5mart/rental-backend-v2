@@ -12,6 +12,16 @@ properties_storage = {}
 users_storage = {}
 messages_storage = {}
 
+def validate_role(role):
+    """Validate user role for registration - must be explicit choice"""
+    if not role:
+        return None  # Registration requires role selection
+    
+    role_lower = role.lower().strip()
+    valid_roles = ['tenant', 'landlord']
+    
+    return role_lower if role_lower in valid_roles else None
+
 @app.route('/')
 def hello():
     return "Flask server running!"
@@ -25,12 +35,21 @@ def register():
         email = data.get('email')
         password = data.get('password')
         phone_number = data.get('phoneNumber')
+        role = data.get('role')
         
         # Basic validation
         if not email or not password or not phone_number:
             return jsonify({
                 'success': False,
                 'message': 'Missing required fields'
+            }), 400
+        
+        # Validate role (must be tenant or landlord)
+        validated_role = validate_role(role)
+        if validated_role is None:
+            return jsonify({
+                'success': False,
+                'message': 'Invalid role. Must be tenant or landlord'
             }), 400
         
         # Check if user already exists
@@ -41,13 +60,22 @@ def register():
                     'message': 'User already exists'
                 }), 400
         
-        # Store user (simple in-memory storage)
+        # Generate display name (from provided or email default)
+        display_name = data.get('displayName')
+        if not display_name or not display_name.strip():
+            # Default: extract name from email and format nicely
+            email_local = email.split('@')[0]
+            display_name = email_local.replace('.', ' ').replace('_', ' ').title()
+        
+        # Store user with role and display name
         user_id = user_counter
         users_storage[user_id] = {
             'userId': user_id,
             'email': email,
+            'displayName': display_name.strip(),  # Store display name
             'password': password,  # In production, this would be hashed
             'phoneNumber': phone_number,
+            'role': validated_role,  # Store validated role
             'createdAt': int(time.time() * 1000)
         }
         user_counter += 1
@@ -56,7 +84,9 @@ def register():
             'success': True,
             'message': 'Registration successful!',
             'token': f'token_user_{user_id}_{int(time.time())}',
-            'userId': user_id
+            'userId': user_id,
+            'role': validated_role,  # Return validated role
+            'displayName': display_name.strip()  # Return display name
         }), 200
         
     except Exception as e:
@@ -89,7 +119,9 @@ def login():
                         'success': True,
                         'message': 'Login successful!',
                         'token': token,
-                        'userId': user_id
+                        'userId': user_id,
+                        'role': user_data.get('role', 'tenant'),  # Return stored role
+                        'displayName': user_data.get('displayName', user_data.get('email', '').split('@')[0])  # Return display name
                     }), 200
                 else:
                     return jsonify({
@@ -236,17 +268,50 @@ def create_property():
 @app.route('/properties', methods=['GET'])
 def get_all_active_properties():
     try:
-        # Return all active properties from storage
+        # Check if request is from authenticated user or guest
+        auth_header = request.headers.get('Authorization')
+        is_authenticated = False
+        
+        if auth_header:
+            user_id = extract_user_id_from_token(auth_header)
+            is_authenticated = user_id and user_id in users_storage
+        
+        # Get all active properties
         active_properties = [
             prop for prop in properties_storage.values() 
             if prop.get('status') == 'active'
         ]
         
-        return jsonify({
-            'success': True,
-            'message': 'Properties retrieved successfully',
-            'properties': active_properties
-        }), 200
+        if is_authenticated:
+            # Authenticated user - return full property data
+            return jsonify({
+                'success': True,
+                'message': 'Properties retrieved successfully',
+                'properties': active_properties
+            }), 200
+        else:
+            # Guest user - return limited property data
+            guest_properties = []
+            for prop in active_properties:
+                guest_properties.append({
+                    'propertyId': prop['propertyId'],
+                    'title': prop['title'],
+                    'price': prop['price'],
+                    'location': prop['location'],  # Basic location
+                    'propertyType': prop['propertyType'],
+                    'bedrooms': prop['bedrooms'],
+                    'bathrooms': prop['bathrooms'],
+                    # Hidden from guests:
+                    # 'description': HIDDEN
+                    # 'photos': HIDDEN
+                    # 'userId': HIDDEN (no contact info)
+                })
+            
+            return jsonify({
+                'success': True,
+                'message': 'Properties retrieved successfully (guest view)',
+                'properties': guest_properties
+            }), 200
         
     except Exception as e:
         return jsonify({
@@ -293,11 +358,40 @@ def get_property_by_id(property_id):
                 'message': 'Property not found'
             }), 404
         
-        return jsonify({
-            'success': True,
-            'message': 'Property retrieved successfully',
-            'property': property_data
-        }), 200
+        # Check if request is from authenticated user or guest
+        auth_header = request.headers.get('Authorization')
+        is_authenticated = False
+        
+        if auth_header:
+            user_id = extract_user_id_from_token(auth_header)
+            is_authenticated = user_id and user_id in users_storage
+        
+        if is_authenticated:
+            # Authenticated user - full property details
+            return jsonify({
+                'success': True,
+                'message': 'Property retrieved successfully',
+                'property': property_data
+            }), 200
+        else:
+            # Guest user - limited property details
+            guest_property = {
+                'propertyId': property_data['propertyId'],
+                'title': property_data['title'],
+                'price': property_data['price'],
+                'location': property_data['location'],
+                'propertyType': property_data['propertyType'],
+                'bedrooms': property_data['bedrooms'],
+                'bathrooms': property_data['bathrooms'],
+                'description': 'Register to see full details',  # Limited description
+                # Hidden: photos, userId, full description
+            }
+            
+            return jsonify({
+                'success': True,
+                'message': 'Property retrieved successfully (guest view)',
+                'property': guest_property
+            }), 200
         
     except Exception as e:
         return jsonify({
@@ -412,6 +506,14 @@ def search_properties():
         min_bedrooms = request.args.get('minBedrooms', type=int)
         property_type = request.args.get('propertyType')
         
+        # Check authentication status
+        auth_header = request.headers.get('Authorization')
+        is_authenticated = False
+        
+        if auth_header:
+            user_id = extract_user_id_from_token(auth_header)
+            is_authenticated = user_id and user_id in users_storage
+        
         # Filter properties based on search criteria
         results = []
         for prop in properties_storage.values():
@@ -438,7 +540,20 @@ def search_properties():
             if property_type and prop.get('propertyType', '').lower() != property_type.lower():
                 continue
             
-            results.append(prop)
+            # Add filtered result
+            if is_authenticated:
+                results.append(prop)
+            else:
+                # Guest view - limited data
+                results.append({
+                    'propertyId': prop['propertyId'],
+                    'title': prop['title'],
+                    'price': prop['price'],
+                    'location': prop['location'],
+                    'propertyType': prop['propertyType'],
+                    'bedrooms': prop['bedrooms'],
+                    'bathrooms': prop['bathrooms']
+                })
         
         return jsonify({
             'success': True,
@@ -533,17 +648,12 @@ def get_expiring_properties(user_id):
             'message': f'Error retrieving expiring properties: {str(e)}'
         }), 500
 
-# Messaging Routes
+# Messaging Routes (authentication required for all)
 @app.route('/messages', methods=['POST'])
 def send_message():
     try:
         global message_counter
         
-        # DEBUG: Print the request data
-        print(f"🔍 DEBUG: Received message request")
-        print(f"🔍 Headers: {dict(request.headers)}")
-        print(f"🔍 Body: {request.get_json()}")
-
         # Get token from Authorization header
         auth_header = request.headers.get('Authorization')
         if not auth_header:
@@ -859,12 +969,29 @@ def delete_conversation():
             'message': f'Delete conversation error: {str(e)}'
         }), 500
 
+# Debug and Testing Routes
 @app.route('/debug/data', methods=['GET'])
 def debug_data():
     return jsonify({
         'users': users_storage,
         'properties': properties_storage,
         'messages': messages_storage
+    })
+
+@app.route('/debug/users', methods=['GET'])
+def debug_users():
+    """Debug endpoint to see all users and their roles"""
+    return jsonify({
+        'users': [
+            {
+                'userId': user['userId'],
+                'email': user['email'],
+                'displayName': user.get('displayName', 'No Name'),
+                'role': user.get('role', 'tenant'),
+                'createdAt': user['createdAt']
+            }
+            for user in users_storage.values()
+        ]
     })
 
 if __name__ == '__main__':

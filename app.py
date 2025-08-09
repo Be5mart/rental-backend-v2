@@ -143,14 +143,25 @@ def login():
 def extract_user_id_from_token(token):
     """Extract user ID from token format: token_user_{id}_{timestamp}"""
     try:
+        print(f"🔍 DEBUG: Raw token: {token}")
+        
         if token.startswith('Bearer '):
-            token = token[7:]
+            token = token[7:]  # Remove "Bearer " prefix
+            print(f"🔍 DEBUG: Token after Bearer removal: {token}")
+        
         parts = token.split('_')
+        print(f"🔍 DEBUG: Token parts: {parts}")
+        
         if len(parts) >= 3 and parts[0] == 'token' and parts[1] == 'user':
-            return int(parts[2])
-    except:
-        pass
-    return None
+            user_id = int(parts[2])
+            print(f"🔍 DEBUG: Extracted user_id: {user_id}")
+            return user_id
+        else:
+            print(f"❌ DEBUG: Invalid token format - expected 'token_user_X_timestamp'")
+            return None
+    except Exception as e:
+        print(f"❌ DEBUG: Token extraction error: {str(e)}")
+        return None
 
 @app.route('/auth/verify-token', methods=['POST'])
 def verify_token():
@@ -268,13 +279,23 @@ def create_property():
 @app.route('/properties', methods=['GET'])
 def get_all_active_properties():
     try:
-        # Check if request is from authenticated user or guest
+        # Debug: Print all headers and auth check
         auth_header = request.headers.get('Authorization')
+        print(f"🔍 DEBUG: Auth header received: {auth_header}")
+        
         is_authenticated = False
+        user_id = None
         
         if auth_header:
             user_id = extract_user_id_from_token(auth_header)
-            is_authenticated = user_id and user_id in users_storage
+            print(f"🔍 DEBUG: Extracted user_id: {user_id}")
+            
+            if user_id:
+                is_authenticated = user_id in users_storage
+                print(f"🔍 DEBUG: User {user_id} in storage: {is_authenticated}")
+                if is_authenticated:
+                    user_data = users_storage[user_id]
+                    print(f"🔍 DEBUG: User role: {user_data.get('role', 'unknown')}")
         
         # Get all active properties
         active_properties = [
@@ -282,8 +303,12 @@ def get_all_active_properties():
             if prop.get('status') == 'active'
         ]
         
+        print(f"🔍 DEBUG: Found {len(active_properties)} active properties")
+        print(f"🔍 DEBUG: Authenticated: {is_authenticated}")
+        
         if is_authenticated:
             # Authenticated user - return full property data
+            print("✅ Returning FULL property data for authenticated user")
             return jsonify({
                 'success': True,
                 'message': 'Properties retrieved successfully',
@@ -291,6 +316,7 @@ def get_all_active_properties():
             }), 200
         else:
             # Guest user - return limited property data
+            print("⚠️ Returning LIMITED property data for guest user")
             guest_properties = []
             for prop in active_properties:
                 guest_properties.append({
@@ -317,6 +343,7 @@ def get_all_active_properties():
             }), 200
         
     except Exception as e:
+        print(f"❌ ERROR in get_all_active_properties: {str(e)}")
         return jsonify({
             'success': False,
             'message': f'Error retrieving properties: {str(e)}'
@@ -363,14 +390,18 @@ def get_property_by_id(property_id):
         
         # Check if request is from authenticated user or guest
         auth_header = request.headers.get('Authorization')
+        print(f"🔍 DEBUG: Single property auth header: {auth_header}")
+        
         is_authenticated = False
         
         if auth_header:
             user_id = extract_user_id_from_token(auth_header)
             is_authenticated = user_id and user_id in users_storage
+            print(f"🔍 DEBUG: Single property authenticated: {is_authenticated}")
         
         if is_authenticated:
             # Authenticated user - full property details
+            print("✅ Returning FULL single property data")
             return jsonify({
                 'success': True,
                 'message': 'Property retrieved successfully',
@@ -378,6 +409,7 @@ def get_property_by_id(property_id):
             }), 200
         else:
             # Guest user - limited property details
+            print("⚠️ Returning LIMITED single property data")
             guest_property = {
                 'propertyId': property_data['propertyId'],
                 'userId': property_data['userId'],  # Include (hidden in UI)

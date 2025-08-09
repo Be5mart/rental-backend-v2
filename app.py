@@ -295,16 +295,19 @@ def get_all_active_properties():
             for prop in active_properties:
                 guest_properties.append({
                     'propertyId': prop['propertyId'],
+                    'userId': prop['userId'],  # Include userId (guest won't see contact info in UI)
                     'title': prop['title'],
+                    'description': 'Register to see full details',  # Safe default
                     'price': prop['price'],
                     'location': prop['location'],  # Basic location
+                    'photos': '[]',  # Empty photos array
                     'propertyType': prop['propertyType'],
                     'bedrooms': prop['bedrooms'],
                     'bathrooms': prop['bathrooms'],
-                    # Hidden from guests:
-                    # 'description': HIDDEN
-                    # 'photos': HIDDEN
-                    # 'userId': HIDDEN (no contact info)
+                    'createdAt': prop['createdAt'],  # Include for sorting
+                    'expiresAt': prop['expiresAt'],  # Include for validity
+                    'status': prop['status']  # Include for filtering
+                    # Hidden from guests in UI layer, not API layer
                 })
             
             return jsonify({
@@ -377,14 +380,19 @@ def get_property_by_id(property_id):
             # Guest user - limited property details
             guest_property = {
                 'propertyId': property_data['propertyId'],
+                'userId': property_data['userId'],  # Include (hidden in UI)
                 'title': property_data['title'],
+                'description': 'Register to see full details',  # Safe default
                 'price': property_data['price'],
                 'location': property_data['location'],
+                'photos': '[]',  # Empty photos array
                 'propertyType': property_data['propertyType'],
                 'bedrooms': property_data['bedrooms'],
                 'bathrooms': property_data['bathrooms'],
-                'description': 'Register to see full details',  # Limited description
-                # Hidden: photos, userId, full description
+                'createdAt': property_data['createdAt'],
+                'expiresAt': property_data['expiresAt'],
+                'status': property_data['status']
+                # Content filtering happens in UI, not API
             }
             
             return jsonify({
@@ -547,12 +555,18 @@ def search_properties():
                 # Guest view - limited data
                 results.append({
                     'propertyId': prop['propertyId'],
+                    'userId': prop['userId'],  # Include (UI controls visibility)
                     'title': prop['title'],
+                    'description': 'Register to see full details',  # Safe default
                     'price': prop['price'],
                     'location': prop['location'],
+                    'photos': '[]',  # Empty photos
                     'propertyType': prop['propertyType'],
                     'bedrooms': prop['bedrooms'],
-                    'bathrooms': prop['bathrooms']
+                    'bathrooms': prop['bathrooms'],
+                    'createdAt': prop['createdAt'],
+                    'expiresAt': prop['expiresAt'], 
+                    'status': prop['status']
                 })
         
         return jsonify({

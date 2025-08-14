@@ -491,113 +491,55 @@ def get_user_properties(user_id):
 @app.route('/properties/<int:property_id>', methods=['GET'])
 def get_property_by_id(property_id):
     try:
-
-        property_data = properties_storage.get(property_id)
-        if not property_data:
-
         prop = properties_storage.get(property_id)
         if not prop:
-            return jsonify({
-                'success': False,
-                'message': 'Property not found'
-            }), 404
-        
+            return jsonify({'success': False, 'message': 'Property not found'}), 404
 
-        # Check if request is from authenticated user or guest
-        auth_header = request.headers.get('Authorization')
-        print(f"🔍 DEBUG: Single property auth header: {auth_header}")
-        
-        is_authenticated = False
-        
-        if auth_header:
-            user_id = extract_user_id_from_token(auth_header)
-            is_authenticated = user_id and user_id in users_storage
-            print(f"🔍 DEBUG: Single property authenticated: {is_authenticated}")
-        
-        if is_authenticated:
-            # Authenticated user - full property details
-            print("✅ Returning FULL single property data")
-            return jsonify({
-                'success': True,
-                'message': 'Property retrieved successfully',
-                'property': property_data
-            }), 200
-        else:
-            # Guest user - limited property details
-            print("⚠️ Returning LIMITED single property data")
-            guest_property = {
-                'propertyId': property_data['propertyId'],
-                'userId': property_data['userId'],  # Include (hidden in UI)
-                'title': property_data['title'],
-                'description': 'Register to see full details',  # Safe default
-                'price': property_data['price'],
-                'location': property_data['location'],
-                'photos': '[]',  # Empty photos array
-                'propertyType': property_data['propertyType'],
-                'bedrooms': property_data['bedrooms'],
-                'bathrooms': property_data['bathrooms'],
-                'createdAt': property_data['createdAt'],
-                'expiresAt': property_data['expiresAt'],
-                'status': property_data['status']
-                # Content filtering happens in UI, not API
-            }
-            
-            return jsonify({
-                'success': True,
-                'message': 'Property retrieved successfully (guest view)',
-                'property': guest_property
-            }), 200
-
-        # Extract caller & params
+        # Who is calling?
         auth_header = request.headers.get('Authorization')
         caller_id = extract_user_id_from_token(auth_header) if auth_header else None
-        other_user_id = request.args.get('otherUserId', type=int)  # tenant id, when caller is the tenant
-        
+        other_user_id = request.args.get('otherUserId', type=int)  # tenant id when caller is tenant
+
         # Hide expired from non-owners
         if not is_current(prop):
             if not caller_id or caller_id != prop.get('userId'):
                 return jsonify({'success': False, 'message': 'Property not found'}), 404
-        
-        # Owner sees full
+
+        # Owner → full
         if caller_id and prop.get('userId') == caller_id:
             return jsonify({'success': True, 'property': prop}), 200
 
-        # Guest (no auth): return teaser view only
+        # Guest → teaser
         if not caller_id:
             return jsonify({'success': True, 'property': teaser_of(prop)}), 200
 
-        # Authenticated non-owner: apply conversation flags if provided
+        # Non-owner, conversation flags path
         if other_user_id:
             if other_user_id != caller_id:
-                print(f"🚫 403 PROPERTY_DETAIL_FOREIGN_USER: caller_id={caller_id}, other_user_id={other_user_id}, property_id={property_id}")
                 return jsonify({'success': False, 'message': 'otherUserId must be your userId'}), 403
+
             flags = get_visibility_flags(property_id, other_user_id)
             resp = dict(prop)
 
             if not flags['canSeeExactAddress'] and not flags['canSeeStreet']:
-                # strip everything precise
                 for f in ['addressStreet', 'addressNumber', 'lat', 'lon']:
                     resp.pop(f, None)
                 return jsonify({'success': True, 'property': resp}), 200
 
             if flags['canSeeStreet'] and not flags['canSeeExactAddress']:
-                # allow street only; strip number & precise coords
                 resp.pop('addressNumber', None)
                 resp.pop('lat', None); resp.pop('lon', None)
                 return jsonify({'success': True, 'property': resp}), 200
 
             if flags['canSeeExactAddress']:
-                # full details allowed
                 return jsonify({'success': True, 'property': resp}), 200
 
-        # Fallback (no otherUserId provided): behave like guest teaser
+        # Fallback (no otherUserId): teaser
         return jsonify({'success': True, 'property': teaser_of(prop)}), 200
-        
+
     except Exception as e:
-        return jsonify({
-            'success': False,
-            'message': f'Error retrieving property: {str(e)}'
-        }), 500
+        return jsonify({'success': False, 'message': f'Error retrieving property: {str(e)}'}), 500
+
 
 @app.route('/properties/<int:property_id>', methods=['PUT'])
 def update_property(property_id):
@@ -706,88 +648,78 @@ def delete_property(property_id):
 @app.route('/properties/search', methods=['GET'])
 def search_properties():
     try:
-        # Get query parameters
-        search_term = request.args.get('q')
-        min_price = request.args.get('minPrice', type=int)
-        max_price = request.args.get('maxPrice', type=int)
-        min_bedrooms = request.args.get('minBedrooms', type=int)
-        property_type = request.args.get('propertyType')
-        
-        # Check authentication status
+        # Auth context (optional)
         auth_header = request.headers.get('Authorization')
-        is_authenticated = False
-        
-        if auth_header:
-            user_id = extract_user_id_from_token(auth_header)
-            is_authenticated = user_id and user_id in users_storage
-        
-        # Filter properties based on search criteria
+        user_id = extract_user_id_from_token(auth_header) if auth_header else None
+        is_authenticated = bool(user_id and user_id in users_storage)
+
+        # Query params
+        search_term   = request.args.get('q', type=str)
+        min_price     = request.args.get('minPrice', type=int)
+        max_price     = request.args.get('maxPrice', type=int)
+        bedrooms      = request.args.get('bedrooms', type=int)
+        bathrooms     = request.args.get('bathrooms', type=int)
+        property_type = request.args.get('propertyType', type=str)
+        neighborhood  = request.args.get('neighborhood', type=str) or request.args.get('area', type=str)
+
         results = []
         for prop in properties_storage.values():
-
+            # Only active + not expired for non-owners
             if prop.get('status') != 'active':
-
+                continue
             if not is_current(prop):
                 continue
-            
-            # Search term filter
+
+            # ------------ Filters ------------
             if search_term:
-                if (search_term.lower() not in prop.get('title', '').lower() and 
-                    search_term.lower() not in prop.get('description', '').lower()):
+                term = search_term.lower().strip()
+                # Title/description/type/neighborhood match
+                hay = f"{prop.get('title','')} {prop.get('description','')} {prop.get('propertyType','')} {prop.get('neighborhood','')}".lower()
+                if term not in hay:
                     continue
-            
-            # Price filters
-            if min_price and prop.get('price', 0) < min_price:
-                continue
-            if max_price and prop.get('price', 0) > max_price:
-                continue
-            
-            # Bedroom filter
-            if min_bedrooms and prop.get('bedrooms', 0) < min_bedrooms:
-                continue
-            
-            # Property type filter
-            if property_type and prop.get('propertyType', '').lower() != property_type.lower():
-                continue
-            
-            # Add filtered result
 
-            if is_authenticated:
-                results.append(prop)
-            else:
-                # Guest view - limited data
-                results.append({
-                    'propertyId': prop['propertyId'],
-                    'userId': prop['userId'],  # Include (UI controls visibility)
-                    'title': prop['title'],
-                    'description': 'Register to see full details',  # Safe default
-                    'price': prop['price'],
-                    'location': prop['location'],
-                    'photos': '[]',  # Empty photos
-                    'propertyType': prop['propertyType'],
-                    'bedrooms': prop['bedrooms'],
-                    'bathrooms': prop['bathrooms'],
-                    'createdAt': prop['createdAt'],
-                    'expiresAt': prop['expiresAt'], 
-                    'status': prop['status']
-                })
+            if min_price is not None and isinstance(prop.get('price'), (int, float)):
+                if prop['price'] < min_price:
+                    continue
+            if max_price is not None and isinstance(prop.get('price'), (int, float)):
+                if prop['price'] > max_price:
+                    continue
 
+            if bedrooms is not None and isinstance(prop.get('bedrooms'), int):
+                if prop['bedrooms'] < bedrooms:
+                    continue
+            if bathrooms is not None and isinstance(prop.get('bathrooms'), int):
+                if prop['bathrooms'] < bathrooms:
+                    continue
+
+            if property_type:
+                if str(prop.get('propertyType', '')).lower() != property_type.lower():
+                    continue
+
+            if neighborhood:
+                # loose contains to allow partial area names
+                if neighborhood.lower() not in str(prop.get('neighborhood', '')).lower():
+                    continue
+            # ------------ End filters ------------
+
+            # Owner → full, others → teaser
             if is_authenticated and prop.get('userId') == user_id:
                 results.append(prop)
             else:
                 results.append(teaser_of(prop))
-        
+
         return jsonify({
             'success': True,
-            'message': 'Search completed successfully',
+            'message': 'Properties retrieved successfully',
             'properties': results
         }), 200
-        
+
     except Exception as e:
         return jsonify({
             'success': False,
-            'message': f'Search error: {str(e)}'
+            'message': f'Error searching properties: {str(e)}'
         }), 500
+
 
 @app.route('/properties/<int:property_id>/renew', methods=['POST'])
 def renew_property(property_id):
@@ -839,61 +771,44 @@ def renew_property(property_id):
 @app.route('/properties/user/<int:user_id>/expiring', methods=['GET'])
 def get_expiring_properties(user_id):
     try:
-        # Get token from Authorization header
+        # Auth required
         auth_header = request.headers.get('Authorization')
         if not auth_header:
-            return jsonify({
-                'success': False,
-                'message': 'Authentication required'
-            }), 401
-        
-
+            return jsonify({'success': False, 'message': 'Authentication required'}), 401
 
         requester_id = extract_user_id_from_token(auth_header)
         if not requester_id or requester_id not in users_storage:
-            return jsonify({
-                'success': False,
-                'message': 'Invalid authentication'
-            }), 401
-        
-        # Get properties expiring within 5 days
-        current_time = int(time.time() * 1000)
-        five_days = 5 * 24 * 60 * 60 * 1000
-        
-        expiring_properties = [
-            prop for prop in properties_storage.values()
-            if (prop.get('userId') == user_id and 
+            return jsonify({'success': False, 'message': 'Invalid authentication'}), 401
 
-                prop.get('status') == 'active' and
-                prop.get('expiresAt', 0) - current_time <= five_days)
-        ]
-        
+        # Window: expiring within 5 days (but not already expired)
+        current_time = int(time.time() * 1000)
+        five_days = 5 * 24 * 60 * 60 * 1000  # ms
+
+        expiring_properties = []
+        for prop in properties_storage.values():
+            # Must belong to the requested user
+            if prop.get('userId') != user_id:
+                continue
+
+            # Respect global expiry policy + active status
+            if not is_current(prop):
+                continue
+
+            # Keep only those that expire within the next 5 days
+            expires_at = int(prop.get('expiresAt', 0) or 0)
+            if 0 < (expires_at - current_time) <= five_days:
+                # Owner → full; Non-owner → teaser
+                if requester_id == user_id:
+                    expiring_properties.append(prop)
+                else:
+                    expiring_properties.append(teaser_of(prop))
+
         return jsonify({
             'success': True,
             'message': 'Expiring properties retrieved successfully',
             'properties': expiring_properties
         }), 200
 
-                is_current(prop) and  # Proper status + expiry validation
-                prop.get('expiresAt', 0) - current_time <= five_days)  # Expiring within 5 days
-        ]
-        
-        if requester_id == user_id:
-            # Owner sees full details
-            return jsonify({
-                'success': True,
-                'message': 'Expiring properties retrieved successfully',
-                'properties': expiring_properties
-            }), 200
-        else:
-            # Non-owner sees teasers only
-            expiring_teasers = [teaser_of(prop) for prop in expiring_properties]
-            return jsonify({
-                'success': True,
-                'message': 'Expiring properties retrieved successfully',
-                'properties': expiring_teasers
-            }), 200
-        
     except Exception as e:
         return jsonify({
             'success': False,
@@ -1306,7 +1221,6 @@ def get_conversation_visibility():
         auth_header = request.headers.get('Authorization')
         user_id = extract_user_id_from_token(auth_header) if auth_header else None
         if not user_id:
-            print(f"🚫 401 VISIBILITY_NO_AUTH: IP={request.remote_addr}")
             return jsonify({'success': False, 'message': 'Authentication required'}), 401
 
         property_id = request.args.get('propertyId', type=int)
@@ -1321,10 +1235,11 @@ def get_conversation_visibility():
         is_owner = (prop.get('userId') == user_id)
         is_tenant = (user_id == tenant_id)
         if not (is_owner or is_tenant):
-            print(f"🚫 403 VISIBILITY_ACCESS_DENIED: user_id={user_id}, property_owner={prop.get('userId')}, tenant_id={tenant_id}")
             return jsonify({'success': False, 'message': 'Not authorized to view visibility'}), 403
 
-        return jsonify({'success': True, **get_visibility_flags(property_id, tenant_id)}), 200
+        flags = get_visibility_flags(property_id, tenant_id)
+        return jsonify({'success': True, **flags}), 200
+
     except Exception as e:
         return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
 

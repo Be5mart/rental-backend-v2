@@ -1,8 +1,16 @@
 from flask import Flask, request, jsonify
+<<<<<<< HEAD
+=======
+from flask_cors import CORS
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
 import time
 import json
 
 app = Flask(__name__)
+<<<<<<< HEAD
+=======
+CORS(app)  # tighten origins later
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
 
 # In-memory storage (will be replaced with database later)
 property_counter = 1
@@ -12,6 +20,38 @@ properties_storage = {}
 users_storage = {}
 messages_storage = {}
 
+<<<<<<< HEAD
+=======
+# Conversation visibility flags:
+# key: f"{property_id}_{tenant_id}" -> {"canSeeStreet": bool, "canSeeExactAddress": bool}
+conversation_visibility = {}
+
+def visibility_key(property_id: int, tenant_id: int) -> str:
+    return f"{property_id}_{tenant_id}"
+
+def get_visibility_flags(property_id: int, tenant_id: int):
+    flags = conversation_visibility.get(visibility_key(property_id, tenant_id), {})
+    return {
+        "canSeeStreet": bool(flags.get("canSeeStreet", False)),
+        "canSeeExactAddress": bool(flags.get("canSeeExactAddress", False)),
+    }
+
+def teaser_of(prop: dict) -> dict:
+    return {
+        'propertyId': prop['propertyId'],
+        'title': prop['title'],
+        'price': prop['price'],
+        'location': prop['location'],
+        'propertyType': prop['propertyType'],
+        'bedrooms': prop['bedrooms'],
+        'bathrooms': prop['bathrooms'],
+    }
+
+def is_current(prop: dict) -> bool:
+    now_ms = int(time.time() * 1000)
+    return prop.get('status') == 'active' and prop.get('expiresAt', now_ms) > now_ms
+
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
 def validate_role(role):
     """Validate user role for registration - must be explicit choice"""
     if not role:
@@ -143,6 +183,7 @@ def login():
 def extract_user_id_from_token(token):
     """Extract user ID from token format: token_user_{id}_{timestamp}"""
     try:
+<<<<<<< HEAD
         print(f"🔍 DEBUG: Raw token: {token}")
         
         if token.startswith('Bearer '):
@@ -162,6 +203,16 @@ def extract_user_id_from_token(token):
     except Exception as e:
         print(f"❌ DEBUG: Token extraction error: {str(e)}")
         return None
+=======
+        if token.startswith('Bearer '):
+            token = token[7:]
+        parts = token.split('_')
+        if len(parts) >= 3 and parts[0] == 'token' and parts[1] == 'user':
+            return int(parts[2])
+    except:
+        pass
+    return None
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
 
 @app.route('/auth/verify-token', methods=['POST'])
 def verify_token():
@@ -206,6 +257,27 @@ def logout():
             'message': f'Logout error: {str(e)}'
         }), 500
 
+<<<<<<< HEAD
+=======
+@app.route('/auth/me', methods=['GET'])
+def me():
+    try:
+        auth_header = request.headers.get('Authorization')
+        user_id = extract_user_id_from_token(auth_header) if auth_header else None
+        if not user_id or user_id not in users_storage:
+            return jsonify({'success': False, 'message': 'Authentication required'}), 401
+        u = users_storage[user_id]
+        return jsonify({
+            'success': True,
+            'userId': user_id,
+            'email': u.get('email'),
+            'displayName': u.get('displayName', ''),
+            'role': u.get('role', 'tenant')
+        }), 200
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
 # Property Management Routes
 @app.route('/properties', methods=['POST'])
 def create_property():
@@ -228,6 +300,18 @@ def create_property():
                 'message': 'Invalid authentication'
             }), 401
         
+<<<<<<< HEAD
+=======
+        # Ensure only landlords can create listings
+        user = users_storage.get(user_id)
+        if not user or user.get('role') != 'landlord':
+            print(f"🚫 403 CREATE_LISTING_DENIED: user_id={user_id}, role={user.get('role') if user else 'None'}")
+            return jsonify({
+                'success': False,
+                'message': 'Create Listing is for landlords'
+            }), 403
+        
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
         data = request.get_json()
         
         # Validate required fields
@@ -260,6 +344,14 @@ def create_property():
             'status': 'active'
         }
         
+<<<<<<< HEAD
+=======
+        # Accept optional structured address fields
+        for f in ['addressStreet', 'addressNumber', 'neighborhood', 'lat', 'lon']:
+            if f in data:
+                property_data[f] = data[f]
+        
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
         # Store property in memory
         properties_storage[property_id] = property_data
         property_counter += 1
@@ -279,6 +371,7 @@ def create_property():
 @app.route('/properties', methods=['GET'])
 def get_all_active_properties():
     try:
+<<<<<<< HEAD
         # Debug: Print all headers and auth check
         auth_header = request.headers.get('Authorization')
         print(f"🔍 DEBUG: Auth header received: {auth_header}")
@@ -344,6 +437,22 @@ def get_all_active_properties():
         
     except Exception as e:
         print(f"❌ ERROR in get_all_active_properties: {str(e)}")
+=======
+        auth_header = request.headers.get('Authorization')
+        caller_id = extract_user_id_from_token(auth_header) if auth_header else None
+        is_authenticated = bool(caller_id and caller_id in users_storage)
+
+        active_properties = [p for p in properties_storage.values() if is_current(p)]
+
+        if is_authenticated:
+            safe_props = [p if p.get('userId') == caller_id else teaser_of(p) for p in active_properties]
+            return jsonify({'success': True, 'message': 'Properties retrieved successfully', 'properties': safe_props}), 200
+        else:
+            guest_props = [teaser_of(p) for p in active_properties]
+            return jsonify({'success': True, 'message': 'Properties retrieved successfully (guest view)', 'properties': guest_props}), 200
+        
+    except Exception as e:
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
         return jsonify({
             'success': False,
             'message': f'Error retrieving properties: {str(e)}'
@@ -360,6 +469,7 @@ def get_user_properties(user_id):
                 'message': 'Authentication required'
             }), 401
         
+<<<<<<< HEAD
         # Get properties for specific user
         user_properties = [
             prop for prop in properties_storage.values() 
@@ -371,6 +481,15 @@ def get_user_properties(user_id):
             'message': 'User properties retrieved successfully',
             'properties': user_properties
         }), 200
+=======
+        requester_id = extract_user_id_from_token(auth_header)
+        if requester_id == user_id:
+            owned_active = [p for p in properties_storage.values() if p.get('userId') == user_id and is_current(p)]
+            return jsonify({'success': True, 'message': 'User properties retrieved successfully', 'properties': owned_active}), 200
+        else:
+            public_active = [teaser_of(p) for p in properties_storage.values() if p.get('userId') == user_id and is_current(p)]
+            return jsonify({'success': True, 'message': 'User properties retrieved successfully', 'properties': public_active}), 200
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
         
     except Exception as e:
         return jsonify({
@@ -381,13 +500,19 @@ def get_user_properties(user_id):
 @app.route('/properties/<int:property_id>', methods=['GET'])
 def get_property_by_id(property_id):
     try:
+<<<<<<< HEAD
         property_data = properties_storage.get(property_id)
         if not property_data:
+=======
+        prop = properties_storage.get(property_id)
+        if not prop:
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
             return jsonify({
                 'success': False,
                 'message': 'Property not found'
             }), 404
         
+<<<<<<< HEAD
         # Check if request is from authenticated user or guest
         auth_header = request.headers.get('Authorization')
         print(f"🔍 DEBUG: Single property auth header: {auth_header}")
@@ -432,6 +557,52 @@ def get_property_by_id(property_id):
                 'message': 'Property retrieved successfully (guest view)',
                 'property': guest_property
             }), 200
+=======
+        # Extract caller & params
+        auth_header = request.headers.get('Authorization')
+        caller_id = extract_user_id_from_token(auth_header) if auth_header else None
+        other_user_id = request.args.get('otherUserId', type=int)  # tenant id, when caller is the tenant
+        
+        # Hide expired from non-owners
+        if not is_current(prop):
+            if not caller_id or caller_id != prop.get('userId'):
+                return jsonify({'success': False, 'message': 'Property not found'}), 404
+        
+        # Owner sees full
+        if caller_id and prop.get('userId') == caller_id:
+            return jsonify({'success': True, 'property': prop}), 200
+
+        # Guest (no auth): return teaser view only
+        if not caller_id:
+            return jsonify({'success': True, 'property': teaser_of(prop)}), 200
+
+        # Authenticated non-owner: apply conversation flags if provided
+        if other_user_id:
+            if other_user_id != caller_id:
+                print(f"🚫 403 PROPERTY_DETAIL_FOREIGN_USER: caller_id={caller_id}, other_user_id={other_user_id}, property_id={property_id}")
+                return jsonify({'success': False, 'message': 'otherUserId must be your userId'}), 403
+            flags = get_visibility_flags(property_id, other_user_id)
+            resp = dict(prop)
+
+            if not flags['canSeeExactAddress'] and not flags['canSeeStreet']:
+                # strip everything precise
+                for f in ['addressStreet', 'addressNumber', 'lat', 'lon']:
+                    resp.pop(f, None)
+                return jsonify({'success': True, 'property': resp}), 200
+
+            if flags['canSeeStreet'] and not flags['canSeeExactAddress']:
+                # allow street only; strip number & precise coords
+                resp.pop('addressNumber', None)
+                resp.pop('lat', None); resp.pop('lon', None)
+                return jsonify({'success': True, 'property': resp}), 200
+
+            if flags['canSeeExactAddress']:
+                # full details allowed
+                return jsonify({'success': True, 'property': resp}), 200
+
+        # Fallback (no otherUserId provided): behave like guest teaser
+        return jsonify({'success': True, 'property': teaser_of(prop)}), 200
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
         
     except Exception as e:
         return jsonify({
@@ -477,6 +648,14 @@ def update_property(property_id):
             if field in data:
                 property_data[field] = data[field]
         
+<<<<<<< HEAD
+=======
+        # Accept optional structured address fields
+        for f in ['addressStreet', 'addressNumber', 'neighborhood', 'lat', 'lon']:
+            if f in data:
+                property_data[f] = data[f]
+        
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
         properties_storage[property_id] = property_data
         
         return jsonify({
@@ -557,7 +736,11 @@ def search_properties():
         # Filter properties based on search criteria
         results = []
         for prop in properties_storage.values():
+<<<<<<< HEAD
             if prop.get('status') != 'active':
+=======
+            if not is_current(prop):
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
                 continue
             
             # Search term filter
@@ -581,6 +764,7 @@ def search_properties():
                 continue
             
             # Add filtered result
+<<<<<<< HEAD
             if is_authenticated:
                 results.append(prop)
             else:
@@ -600,6 +784,12 @@ def search_properties():
                     'expiresAt': prop['expiresAt'], 
                     'status': prop['status']
                 })
+=======
+            if is_authenticated and prop.get('userId') == user_id:
+                results.append(prop)
+            else:
+                results.append(teaser_of(prop))
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
         
         return jsonify({
             'success': True,
@@ -671,6 +861,16 @@ def get_expiring_properties(user_id):
                 'message': 'Authentication required'
             }), 401
         
+<<<<<<< HEAD
+=======
+        requester_id = extract_user_id_from_token(auth_header)
+        if not requester_id or requester_id not in users_storage:
+            return jsonify({
+                'success': False,
+                'message': 'Invalid authentication'
+            }), 401
+        
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
         # Get properties expiring within 5 days
         current_time = int(time.time() * 1000)
         five_days = 5 * 24 * 60 * 60 * 1000
@@ -678,6 +878,7 @@ def get_expiring_properties(user_id):
         expiring_properties = [
             prop for prop in properties_storage.values()
             if (prop.get('userId') == user_id and 
+<<<<<<< HEAD
                 prop.get('status') == 'active' and
                 prop.get('expiresAt', 0) - current_time <= five_days)
         ]
@@ -687,6 +888,27 @@ def get_expiring_properties(user_id):
             'message': 'Expiring properties retrieved successfully',
             'properties': expiring_properties
         }), 200
+=======
+                is_current(prop) and  # Proper status + expiry validation
+                prop.get('expiresAt', 0) - current_time <= five_days)  # Expiring within 5 days
+        ]
+        
+        if requester_id == user_id:
+            # Owner sees full details
+            return jsonify({
+                'success': True,
+                'message': 'Expiring properties retrieved successfully',
+                'properties': expiring_properties
+            }), 200
+        else:
+            # Non-owner sees teasers only
+            expiring_teasers = [teaser_of(prop) for prop in expiring_properties]
+            return jsonify({
+                'success': True,
+                'message': 'Expiring properties retrieved successfully',
+                'properties': expiring_teasers
+            }), 200
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
         
     except Exception as e:
         return jsonify({
@@ -1015,6 +1237,114 @@ def delete_conversation():
             'message': f'Delete conversation error: {str(e)}'
         }), 500
 
+<<<<<<< HEAD
+=======
+@app.route('/conversations/share_street', methods=['POST'])
+def share_street():
+    try:
+        auth_header = request.headers.get('Authorization')
+        user_id = extract_user_id_from_token(auth_header) if auth_header else None
+        if not user_id:
+            print(f"🚫 401 SHARE_STREET_NO_AUTH: IP={request.remote_addr}")
+            return jsonify({'success': False, 'message': 'Authentication required'}), 401
+
+        data = request.get_json() or {}
+        property_id = data.get('propertyId')
+        tenant_id = data.get('tenantId')
+        if not property_id or not tenant_id:
+            return jsonify({'success': False, 'message': 'propertyId and tenantId required'}), 400
+
+        try:
+            tenant_id_int = int(tenant_id)
+        except Exception:
+            return jsonify({'success': False, 'message': 'Invalid tenantId'}), 400
+        if tenant_id_int not in users_storage:
+            return jsonify({'success': False, 'message': 'Tenant not found'}), 404
+
+        # Validate ownership
+        prop = properties_storage.get(int(property_id))
+        if not prop:
+            return jsonify({'success': False, 'message': 'Property not found'}), 404
+        if prop.get('userId') != user_id:
+            print(f"🚫 403 SHARE_STREET_NOT_OWNER: user_id={user_id}, property_owner={prop.get('userId')}, property_id={property_id}")
+            return jsonify({'success': False, 'message': 'Not authorized for this property'}), 403
+
+        key = visibility_key(int(property_id), int(tenant_id))
+        flags = conversation_visibility.setdefault(key, {"canSeeStreet": False, "canSeeExactAddress": False})
+        flags["canSeeStreet"] = True
+
+        return jsonify({'success': True, 'message': 'Street shared for this conversation'}), 200
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+
+
+@app.route('/conversations/share_exact', methods=['POST'])
+def share_exact():
+    try:
+        auth_header = request.headers.get('Authorization')
+        user_id = extract_user_id_from_token(auth_header) if auth_header else None
+        if not user_id:
+            print(f"🚫 401 SHARE_EXACT_NO_AUTH: IP={request.remote_addr}")
+            return jsonify({'success': False, 'message': 'Authentication required'}), 401
+
+        data = request.get_json() or {}
+        property_id = data.get('propertyId')
+        tenant_id = data.get('tenantId')
+        if not property_id or not tenant_id:
+            return jsonify({'success': False, 'message': 'propertyId and tenantId required'}), 400
+
+        try:
+            tenant_id_int = int(tenant_id)
+        except Exception:
+            return jsonify({'success': False, 'message': 'Invalid tenantId'}), 400
+        if tenant_id_int not in users_storage:
+            return jsonify({'success': False, 'message': 'Tenant not found'}), 404
+
+        # Validate ownership
+        prop = properties_storage.get(int(property_id))
+        if not prop:
+            return jsonify({'success': False, 'message': 'Property not found'}), 404
+        if prop.get('userId') != user_id:
+            print(f"🚫 403 SHARE_EXACT_NOT_OWNER: user_id={user_id}, property_owner={prop.get('userId')}, property_id={property_id}")
+            return jsonify({'success': False, 'message': 'Not authorized for this property'}), 403
+
+        key = visibility_key(int(property_id), int(tenant_id))
+        flags = conversation_visibility.setdefault(key, {"canSeeStreet": False, "canSeeExactAddress": False})
+        flags["canSeeExactAddress"] = True
+
+        return jsonify({'success': True, 'message': 'Exact address shared for this conversation'}), 200
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+
+@app.route('/conversations/visibility', methods=['GET'])
+def get_conversation_visibility():
+    try:
+        auth_header = request.headers.get('Authorization')
+        user_id = extract_user_id_from_token(auth_header) if auth_header else None
+        if not user_id:
+            print(f"🚫 401 VISIBILITY_NO_AUTH: IP={request.remote_addr}")
+            return jsonify({'success': False, 'message': 'Authentication required'}), 401
+
+        property_id = request.args.get('propertyId', type=int)
+        tenant_id = request.args.get('tenantId', type=int)
+        if not property_id or not tenant_id:
+            return jsonify({'success': False, 'message': 'propertyId and tenantId required'}), 400
+
+        prop = properties_storage.get(property_id)
+        if not prop:
+            return jsonify({'success': False, 'message': 'Property not found'}), 404
+
+        is_owner = (prop.get('userId') == user_id)
+        is_tenant = (user_id == tenant_id)
+        if not (is_owner or is_tenant):
+            print(f"🚫 403 VISIBILITY_ACCESS_DENIED: user_id={user_id}, property_owner={prop.get('userId')}, tenant_id={tenant_id}")
+            return jsonify({'success': False, 'message': 'Not authorized to view visibility'}), 403
+
+        return jsonify({'success': True, **get_visibility_flags(property_id, tenant_id)}), 200
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+
+>>>>>>> 771c5dc (chore: Railway deploy via Gunicorn 14-08-2025)
 # Debug and Testing Routes
 @app.route('/debug/data', methods=['GET'])
 def debug_data():

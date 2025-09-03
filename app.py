@@ -7,7 +7,7 @@ import time
 import json
 import sys
 import os
-from config.database import db, init_db
+
 
 # Add backend modules to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -20,7 +20,6 @@ from models.user_device import UserDevice
 
 
 app = Flask(__name__)
-init_db(app)
 CORS(app)  # tighten origins later
 
 # JWT setup (env-driven secret)
@@ -31,11 +30,6 @@ jwt = JWTManager(app)
 # Dev secret for debug endpoints
 app.config.setdefault("DEBUG_SECRET", os.getenv("DEBUG_SECRET", "changeme"))
 
-
-# --- Bootstrap SQLAlchemy tables (temporary until proper migrations) ---
-with app.app_context():
-    db.create_all()
-# --- End bootstrap ---
 
 # Register blueprints
 app.register_blueprint(device_routes)
@@ -92,6 +86,11 @@ def validate_role(role):
 @app.route('/')
 def hello():
     return "Flask server running!"
+
+@app.route("/healthz", methods=["GET"])
+def healthz():
+    return jsonify({"status": "ok"}), 200
+
 
 # Authentication Routes
 @app.route('/auth/register', methods=['POST'])

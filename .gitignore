@@ -1,0 +1,12 @@
+# Secrets & local env
+.env
+*.env
+*.pem
+*.key
+*service-account*.json
+rentalplatformdev-firebase-adminsdk-fbsvc-bbd2be5e4d.json
+
+# Local state
+instance/
+__pycache__/
+*.pyc

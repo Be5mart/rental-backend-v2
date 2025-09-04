@@ -7,6 +7,7 @@ import time
 import json
 import sys
 import os
+from config.database import SessionLocal
 
 
 # Add backend modules to path
@@ -90,6 +91,15 @@ def hello():
 @app.route("/healthz", methods=["GET"])
 def healthz():
     return jsonify({"status": "ok"}), 200
+
+# NEW: always release DB sessions back to the pool
+@app.teardown_appcontext
+def remove_session(exception=None):
+    try:
+        SessionLocal.remove()
+    except Exception:
+        # Avoid raising during teardown; log if you prefer
+        pass
 
 
 # Authentication Routes

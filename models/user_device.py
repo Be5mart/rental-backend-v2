@@ -1,4 +1,4 @@
-# /app1-android/backend/models/user_device.py
+# backend/models/user_device.py
 from __future__ import annotations
 from typing import List, Optional
 
@@ -23,8 +23,9 @@ class UserDevice(Base):
         Index("ix_user_devices_user_active", "user_id", "is_active"),
     )
 
-    # ----- CRUD helpers used by services.push_service -----
-
+    # ----------------------------
+    # Query helpers for push flow
+    # ----------------------------
     @staticmethod
     def get_active_tokens_for_user(user_id: int) -> List[str]:
         with SessionLocal() as db:  # type: Session
@@ -35,9 +36,29 @@ class UserDevice(Base):
             return [r[0] for r in rows]
 
     @staticmethod
-    def upsert(user_id: int, platform: str, token: str) -> "UserDevice":
+    def mark_token_invalid(token: str) -> None:
+        """Called by push_service when FCM says a token is UNREGISTERED/410."""
         with SessionLocal() as db:
-            inst: Optional[UserDevice] = db.query(UserDevice).filter(UserDevice.token == token).one_or_none()
+            inst: Optional[UserDevice] = (
+                db.query(UserDevice).filter(UserDevice.token == token).one_or_none()
+            )
+            if inst and inst.is_active:
+                inst.is_active = False
+                db.commit()
+
+    # ----------------------------
+    # Write helpers (core + shims)
+    # ----------------------------
+    @staticmethod
+    def upsert(user_id: int, platform: str, token: str) -> "UserDevice":
+        """
+        Core upsert: ensure (token) row exists and is active for user_id/platform.
+        Returns the instance.
+        """
+        with SessionLocal() as db:
+            inst: Optional[UserDevice] = (
+                db.query(UserDevice).filter(UserDevice.token == token).one_or_none()
+            )
             if inst:
                 inst.user_id = user_id
                 inst.platform = platform
@@ -49,10 +70,38 @@ class UserDevice(Base):
             db.refresh(inst)
             return inst
 
+    # ---- Compatibility shim expected by routes/device_routes.py ----
     @staticmethod
-    def mark_token_invalid(token: str) -> None:
+    def upsert_device(user_id: int, token: str, platform: str) -> bool:
+        """
+        Wrapper to match existing route usage: returns True/False.
+        """
+        try:
+            _ = UserDevice.upsert(user_id=user_id, platform=platform, token=token)
+            return True
+        except Exception as e:
+            # Optional: print or log e
+            print("UserDevice.upsert_device error:", e)
+            return False
+
+    # ---- Compatibility shim for deregistration in routes/device_routes.py ----
+    @staticmethod
+    def deactivate_device(user_id: int, token: Optional[str]) -> int:
+        """
+        If token provided: deactivate that token for the user.
+        If None: deactivate all tokens for the user.
+        Returns number of rows affected.
+        """
         with SessionLocal() as db:
-            inst: Optional[UserDevice] = db.query(UserDevice).filter(UserDevice.token == token).one_or_none()
-            if inst and inst.is_active:
-                inst.is_active = False
+            q = db.query(UserDevice).filter(UserDevice.user_id == user_id, UserDevice.is_active.is_(True))
+            if token:
+                q = q.filter(UserDevice.token == token)
+            count = 0
+            # Use row-by-row to keep it simple & portable
+            for inst in q.all():
+                if inst.is_active:
+                    inst.is_active = False
+                    count += 1
+            if count:
                 db.commit()
+            return count

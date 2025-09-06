@@ -97,7 +97,6 @@ def teaser_of(prop: dict) -> dict:
         'status': p.get('status', 'active'),
     }
 
-
 def is_current(prop: dict) -> bool:
     now_ms = int(time.time() * 1000)
     return prop.get('status') == 'active' and prop.get('expiresAt', now_ms) > now_ms
@@ -333,39 +332,36 @@ def create_property():
                     'message': f'Missing required field: {field}'
                 }), 400
         
+        # Normalize photos into a real list
+        photos_raw = data.get('photos', [])
+        if isinstance(photos_raw, str):
+            try:
+                photos = json.loads(photos_raw)
+            except Exception:
+                photos = []
+        else:
+            photos = list(photos_raw) if photos_raw is not None else []
+        
         # Create property object with unique ID
         current_time = int(time.time() * 1000)
         expires_at = current_time + (30 * 24 * 60 * 60 * 1000)  # 30 days from now
         
         property_id = property_counter
-        # NEW: normalize photos to a real list
-photos_raw = data.get('photos', [])
-if isinstance(photos_raw, str):
-    # Accept JSON string like "[]", "[\"url1\",\"url2\"]"
-    try:
-        photos = json.loads(photos_raw)
-    except Exception:
-        photos = []
-else:
-    photos = list(photos_raw) if photos_raw is not None else []
-
-# ... then build property_data (use `photos` instead of data.get(...))
-property_data = {
-    'propertyId': property_id,
-    'userId': user_id,
-    'title': data['title'],
-    'description': data['description'],
-    'price': data['price'],
-    'location': data['location'],
-    'photos': photos,                            # <-- use normalized list here
-    'bedrooms': data['bedrooms'],
-    'bathrooms': data['bathrooms'],
-    'propertyType': data['propertyType'],
-    'createdAt': current_time,
-    'expiresAt': expires_at,
-    'status': 'active'
-}
-
+        property_data = {
+            'propertyId': property_id,  # UNIQUE ID generated
+            'userId': user_id,  # Real user ID from token
+            'title': data['title'],
+            'description': data['description'],
+            'price': data['price'],
+            'location': data['location'],
+            'photos': photos,
+            'bedrooms': data['bedrooms'],
+            'bathrooms': data['bathrooms'],
+            'propertyType': data['propertyType'],
+            'createdAt': current_time,
+            'expiresAt': expires_at,
+            'status': 'active'
+        }
         
         # Accept optional structured address fields
         for f in ['addressStreet', 'addressNumber', 'neighborhood', 'lat', 'lon']:
@@ -515,24 +511,24 @@ def update_property(property_id):
                 'message': 'Not authorized to update this property'
             }), 403
         
-data = request.get_json()
-
-# Update property fields (normalize photos if present)
-for field in ['title', 'description', 'price', 'location', 'bedrooms', 'bathrooms', 'propertyType']:
-    if field in data:
-        property_data[field] = data[field]
-
-if 'photos' in data:
-    photos_raw = data['photos']
-    if isinstance(photos_raw, str):
-        try:
-            photos = json.loads(photos_raw)
-        except Exception:
-            photos = []
-    else:
-        photos = list(photos_raw) if photos_raw is not None else []
-    property_data['photos'] = photos
-
+        data = request.get_json()
+        
+        # Update property fields (exclude 'photos' here)
+        for field in ['title', 'description', 'price', 'location', 'bedrooms', 'bathrooms', 'propertyType']:
+            if field in data:
+                property_data[field] = data[field]
+        
+        # Handle photos explicitly with normalization
+        if 'photos' in data:
+            pr = data['photos']
+            if isinstance(pr, str):
+                try:
+                    photos = json.loads(pr)
+                except Exception:
+                    photos = []
+            else:
+                photos = list(pr) if pr is not None else []
+            property_data['photos'] = photos
         
         # Accept optional structured address fields
         for f in ['addressStreet', 'addressNumber', 'neighborhood', 'lat', 'lon']:

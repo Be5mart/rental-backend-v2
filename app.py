@@ -63,6 +63,7 @@ def teaser_of(prop: dict) -> dict:
     return {
         'propertyId': prop['propertyId'],
         'title': prop['title'],
+        'description': prop.get('description', ''),
         'price': prop['price'],
         'location': prop['location'],
         'propertyType': prop['propertyType'],

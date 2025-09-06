@@ -59,17 +59,44 @@ def get_visibility_flags(property_id: int, tenant_id: int):
         "canSeeExactAddress": bool(flags.get("canSeeExactAddress", False)),
     }
 
+def _normalize_property(prop: dict) -> dict:
+    """Return a copy with stable shapes for optional fields."""
+    p = dict(prop)
+
+    # description: always a string
+    p['description'] = p.get('description', '') or ''
+
+    # photos: always a JSON array (list), never string/null
+    raw = p.get('photos', [])
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except Exception:
+            raw = []
+    if raw is None:
+        raw = []
+    p['photos'] = list(raw)
+
+    return p
+
 def teaser_of(prop: dict) -> dict:
+    p = _normalize_property(prop)
     return {
-        'propertyId': prop['propertyId'],
-        'title': prop['title'],
-        'description': prop.get('description', ''),
-        'price': prop['price'],
-        'location': prop['location'],
-        'propertyType': prop['propertyType'],
-        'bedrooms': prop['bedrooms'],
-        'bathrooms': prop['bathrooms'],
+        'propertyId': p['propertyId'],
+        'userId': p.get('userId'),           # ok to expose owner id
+        'title': p['title'],
+        'description': p['description'],     # now present
+        'price': p['price'],
+        'location': p['location'],
+        'photos': p['photos'],               # now a JSON array
+        'propertyType': p['propertyType'],
+        'bedrooms': p['bedrooms'],
+        'bathrooms': p['bathrooms'],
+        'createdAt': p.get('createdAt'),
+        'expiresAt': p.get('expiresAt'),
+        'status': p.get('status', 'active'),
     }
+
 
 def is_current(prop: dict) -> bool:
     now_ms = int(time.time() * 1000)
@@ -311,21 +338,34 @@ def create_property():
         expires_at = current_time + (30 * 24 * 60 * 60 * 1000)  # 30 days from now
         
         property_id = property_counter
-        property_data = {
-            'propertyId': property_id,  # UNIQUE ID generated
-            'userId': user_id,  # Real user ID from token
-            'title': data['title'],
-            'description': data['description'],
-            'price': data['price'],
-            'location': data['location'],
-            'photos': data.get('photos', '[]'),
-            'bedrooms': data['bedrooms'],
-            'bathrooms': data['bathrooms'],
-            'propertyType': data['propertyType'],
-            'createdAt': current_time,
-            'expiresAt': expires_at,
-            'status': 'active'
-        }
+        # NEW: normalize photos to a real list
+photos_raw = data.get('photos', [])
+if isinstance(photos_raw, str):
+    # Accept JSON string like "[]", "[\"url1\",\"url2\"]"
+    try:
+        photos = json.loads(photos_raw)
+    except Exception:
+        photos = []
+else:
+    photos = list(photos_raw) if photos_raw is not None else []
+
+# ... then build property_data (use `photos` instead of data.get(...))
+property_data = {
+    'propertyId': property_id,
+    'userId': user_id,
+    'title': data['title'],
+    'description': data['description'],
+    'price': data['price'],
+    'location': data['location'],
+    'photos': photos,                            # <-- use normalized list here
+    'bedrooms': data['bedrooms'],
+    'bathrooms': data['bathrooms'],
+    'propertyType': data['propertyType'],
+    'createdAt': current_time,
+    'expiresAt': expires_at,
+    'status': 'active'
+}
+
         
         # Accept optional structured address fields
         for f in ['addressStreet', 'addressNumber', 'neighborhood', 'lat', 'lon']:
@@ -475,12 +515,24 @@ def update_property(property_id):
                 'message': 'Not authorized to update this property'
             }), 403
         
-        data = request.get_json()
-        
-        # Update property fields
-        for field in ['title', 'description', 'price', 'location', 'photos', 'bedrooms', 'bathrooms', 'propertyType']:
-            if field in data:
-                property_data[field] = data[field]
+data = request.get_json()
+
+# Update property fields (normalize photos if present)
+for field in ['title', 'description', 'price', 'location', 'bedrooms', 'bathrooms', 'propertyType']:
+    if field in data:
+        property_data[field] = data[field]
+
+if 'photos' in data:
+    photos_raw = data['photos']
+    if isinstance(photos_raw, str):
+        try:
+            photos = json.loads(photos_raw)
+        except Exception:
+            photos = []
+    else:
+        photos = list(photos_raw) if photos_raw is not None else []
+    property_data['photos'] = photos
+
         
         # Accept optional structured address fields
         for f in ['addressStreet', 'addressNumber', 'neighborhood', 'lat', 'lon']:

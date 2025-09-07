@@ -68,35 +68,53 @@ class MessagingService:
             return False
     
     @staticmethod
-    def get_sender_display_name(users_storage: dict, sender_id: int) -> str:
+    def get_sender_display_name_from_db(sender_id: int) -> str:
         """
-        Get display name for a sender
+        Get display name for a sender from database
         
         Args:
-            users_storage: Dictionary of user data
             sender_id: ID of the sender
             
         Returns:
             Display name of the sender
         """
         try:
-            sender = users_storage.get(sender_id, {})
-            display_name = sender.get('displayName')
+            # Import here to avoid circular imports
+            from config.database import SessionLocal
+            from models.user import User
             
-            if display_name and display_name.strip():
-                return display_name.strip()
-            
-            # Fallback to email-based name
-            email = sender.get('email', '')
-            if email:
-                email_local = email.split('@')[0]
-                return email_local.replace('.', ' ').replace('_', ' ').title()
-            
-            return "Someone"
-            
+            with SessionLocal() as db:
+                sender = db.query(User).filter(User.user_id == sender_id).first()
+                if not sender:
+                    return "Someone"
+                
+                if sender.display_name and sender.display_name.strip():
+                    return sender.display_name.strip()
+                
+                # Fallback to email-based name
+                if sender.email:
+                    email_local = sender.email.split('@')[0]
+                    return email_local.replace('.', ' ').replace('_', ' ').title()
+                
+                return "Someone"
+                
         except Exception as e:
             print(f"❌ Error getting sender display name: {e}")
             return "Someone"
+    
+    @staticmethod
+    def get_sender_display_name(users_storage: dict, sender_id: int) -> str:
+        """
+        Get display name for a sender (legacy method for compatibility)
+        
+        Args:
+            users_storage: Dictionary of user data (unused, for compatibility)
+            sender_id: ID of the sender
+            
+        Returns:
+            Display name of the sender
+        """
+        return MessagingService.get_sender_display_name_from_db(sender_id)
     
     @staticmethod
     def send_test_push(user_id: int, title: str = "Test Notification", body: str = "This is a test notification") -> bool:

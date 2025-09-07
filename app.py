@@ -7,6 +7,9 @@ import time
 import json
 import sys
 import os
+from datetime import datetime, timedelta
+from sqlalchemy.orm import Session
+from sqlalchemy import and_, or_, desc, func
 from config.database import SessionLocal
 
 
@@ -16,7 +19,10 @@ from services.messaging_service import MessagingService
 from routes.device_routes import device_routes
 from routes.dev_routes import dev_routes
 
-# Import models before app context
+# Import models 
+from models.user import User
+from models.property import Property
+from models.message import Message
 from models.user_device import UserDevice
 
 
@@ -36,16 +42,49 @@ app.config.setdefault("DEBUG_SECRET", os.getenv("DEBUG_SECRET", "changeme"))
 app.register_blueprint(device_routes)
 app.register_blueprint(dev_routes)
 
+# Helper functions
+def hash_password(password: str) -> str:
+    """Simple password hashing - in production use bcrypt or similar"""
+    import hashlib
+    return hashlib.sha256(password.encode()).hexdigest()
 
-# In-memory storage (will be replaced with database later)
-property_counter = 1
-user_counter = 1
-message_counter = 1
-properties_storage = {}
-users_storage = {}
-messages_storage = {}
+def verify_password(password: str, hashed: str) -> bool:
+    """Verify password against hash"""
+    return hash_password(password) == hashed
 
-# Conversation visibility flags:
+def property_to_dict(prop: Property) -> dict:
+    """Convert Property model to dictionary"""
+    return {
+        'propertyId': prop.property_id,
+        'userId': prop.user_id,
+        'title': prop.title,
+        'description': prop.description or '',
+        'price': prop.price,
+        'location': prop.location or {},
+        'photos': prop.photos or [],
+        'bedrooms': prop.bedrooms,
+        'bathrooms': prop.bathrooms,
+        'propertyType': prop.property_type,
+        'createdAt': int(prop.created_at.timestamp() * 1000) if prop.created_at else None,
+        'expiresAt': int(prop.expires_at.timestamp() * 1000) if prop.expires_at else None,
+        'status': prop.status
+    }
+
+def message_to_dict(msg: Message) -> dict:
+    """Convert Message model to dictionary"""
+    return {
+        'messageId': msg.message_id,
+        'senderId': msg.sender_id,
+        'receiverId': msg.receiver_id,
+        'propertyId': msg.property_id,
+        'content': msg.content,
+        'messageType': msg.message_type,
+        'sentAt': int(msg.sent_at.timestamp() * 1000) if msg.sent_at else None,
+        'readAt': int(msg.read_at.timestamp() * 1000) if msg.read_at else None
+    }
+
+
+# Conversation visibility flags (keep in memory for now):
 # key: f"{property_id}_{tenant_id}" -> {"canSeeStreet": bool, "canSeeExactAddress": bool}
 conversation_visibility = {}
 
@@ -97,9 +136,15 @@ def teaser_of(prop: dict) -> dict:
         'status': p.get('status', 'active'),
     }
 
-def is_current(prop: dict) -> bool:
+def is_current(prop_dict: dict) -> bool:
+    """Check if a property dict is currently active"""
     now_ms = int(time.time() * 1000)
-    return prop.get('status') == 'active' and prop.get('expiresAt', now_ms) > now_ms
+    return prop_dict.get('status') == 'active' and prop_dict.get('expiresAt', now_ms) > now_ms
+
+def is_property_current(prop: Property) -> bool:
+    """Check if a Property model instance is currently active"""
+    now = datetime.now()
+    return prop.status == 'active' and (prop.expires_at is None or prop.expires_at > now)
 
 def validate_role(role):
     """Validate user role for registration - must be explicit choice"""
@@ -132,8 +177,8 @@ def remove_session(exception=None):
 # Authentication Routes
 @app.route('/auth/register', methods=['POST'])
 def register():
+    db = SessionLocal()
     try:
-        global user_counter
         data = request.get_json()
         email = data.get('email')
         password = data.get('password')
@@ -156,12 +201,12 @@ def register():
             }), 400
         
         # Check if user already exists
-        for user_id, user_data in users_storage.items():
-            if user_data['email'] == email:
-                return jsonify({
-                    'success': False,
-                    'message': 'User already exists'
-                }), 400
+        existing_user = db.query(User).filter(User.email.ilike(email)).first()
+        if existing_user:
+            return jsonify({
+                'success': False,
+                'message': 'User already exists'
+            }), 400
         
         # Generate display name (from provided or email default)
         display_name = data.get('displayName')
@@ -170,36 +215,39 @@ def register():
             email_local = email.split('@')[0]
             display_name = email_local.replace('.', ' ').replace('_', ' ').title()
         
-        # Store user with role and display name
-        user_id = user_counter
-        users_storage[user_id] = {
-            'userId': user_id,
-            'email': email,
-            'displayName': display_name.strip(),  # Store display name
-            'password': password,  # In production, this would be hashed
-            'phoneNumber': phone_number,
-            'role': validated_role,  # Store validated role
-            'createdAt': int(time.time() * 1000)
-        }
-        user_counter += 1
+        # Create user in database
+        user = User(
+            email=email.lower(),
+            password_hash=hash_password(password),
+            phone_number=phone_number,
+            role=validated_role,
+            display_name=display_name.strip()
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
         
         return jsonify({
             'success': True,
             'message': 'Registration successful!',
-            'token': create_access_token(identity=str(user_id)),
-            'userId': user_id,
-            'role': validated_role,  # Return validated role
-            'displayName': display_name.strip()  # Return display name
+            'token': create_access_token(identity=str(user.user_id)),
+            'userId': user.user_id,
+            'role': user.role,
+            'displayName': user.display_name
         }), 200
         
     except Exception as e:
+        db.rollback()
         return jsonify({
             'success': False,
             'message': f'Registration error: {str(e)}'
         }), 500
+    finally:
+        db.close()
 
 @app.route('/auth/login', methods=['POST'])
 def login():
+    db = SessionLocal()
     try:
         data = request.get_json()
         email = data.get('email')
@@ -213,36 +261,38 @@ def login():
             }), 400
         
         # Find user and verify password
-        for user_id, user_data in users_storage.items():
-            if user_data['email'] == email:
-                if user_data['password'] == password:
-                    token = create_access_token(identity=str(user_id))
-                    # Avoid logging full JWTs in any environment
-                    print(f"🔑 Generated token for {email}: len={len(token)}")
-                    return jsonify({
-                        'success': True,
-                        'message': 'Login successful!',
-                        'token': token,
-                        'userId': user_id,
-                        'role': user_data.get('role', 'tenant'),  # Return stored role
-                        'displayName': user_data.get('displayName', user_data.get('email', '').split('@')[0])  # Return display name
-                    }), 200
-                else:
-                    return jsonify({
-                        'success': False,
-                        'message': 'Invalid password'
-                    }), 401
+        user = db.query(User).filter(User.email.ilike(email)).first()
+        if not user:
+            return jsonify({
+                'success': False,
+                'message': 'User not found'
+            }), 401
         
+        if not verify_password(password, user.password_hash):
+            return jsonify({
+                'success': False,
+                'message': 'Invalid password'
+            }), 401
+        
+        token = create_access_token(identity=str(user.user_id))
+        # Avoid logging full JWTs in any environment
+        print(f"🔑 Generated token for {email}: len={len(token)}")
         return jsonify({
-            'success': False,
-            'message': 'User not found'
-        }), 401
+            'success': True,
+            'message': 'Login successful!',
+            'token': token,
+            'userId': user.user_id,
+            'role': user.role,
+            'displayName': user.display_name or user.email.split('@')[0]
+        }), 200
         
     except Exception as e:
         return jsonify({
             'success': False,
             'message': f'Login error: {str(e)}'
         }), 500
+    finally:
+        db.close()
 
 def get_authenticated_user_id():
     """Return int user_id from JWT or None."""
@@ -257,16 +307,24 @@ def get_authenticated_user_id():
 
 @app.route('/auth/verify-token', methods=['POST'])
 def verify_token():
+    db = SessionLocal()
     try:
         # Enforce JWT presence/validity explicitly
         verify_jwt_in_request(optional=False)
         uid = get_jwt_identity()
-        # For this in-memory phase, optionally check presence in users_storage
-        if uid is None or int(uid) not in users_storage:
+        # Check if user exists in database
+        if uid is None:
             return jsonify({'success': False, 'message': 'Invalid token'}), 401
+        
+        user = db.query(User).filter(User.user_id == int(uid)).first()
+        if not user:
+            return jsonify({'success': False, 'message': 'Invalid token'}), 401
+            
         return jsonify({'success': True, 'message': 'Token is valid'}), 200
     except Exception as e:
         return jsonify({'success': False, 'message': f'Token verification error: {str(e)}'}), 401
+    finally:
+        db.close()
 
 @app.route('/auth/logout', methods=['POST'])
 def logout():
@@ -284,38 +342,44 @@ def logout():
 
 @app.route('/auth/me', methods=['GET'])
 def me():
+    db = SessionLocal()
     try:
         user_id = get_authenticated_user_id()
-        if not user_id or user_id not in users_storage:
+        if not user_id:
             return jsonify({'success': False, 'message': 'Authentication required'}), 401
-        u = users_storage[user_id]
+        
+        user = db.query(User).filter(User.user_id == user_id).first()
+        if not user:
+            return jsonify({'success': False, 'message': 'Authentication required'}), 401
+        
         return jsonify({
             'success': True,
-            'userId': user_id,
-            'email': u.get('email'),
-            'displayName': u.get('displayName', ''),
-            'role': u.get('role', 'tenant')
+            'userId': user.user_id,
+            'email': user.email,
+            'displayName': user.display_name or '',
+            'role': user.role
         }), 200
     except Exception as e:
         return jsonify({'success': False, 'message': f'Error: {str(e)}'}), 500
+    finally:
+        db.close()
 
 # Property Management Routes
 @app.route('/properties', methods=['POST'])
 def create_property():
+    db = SessionLocal()
     try:
-        global property_counter
-        
         user_id = get_authenticated_user_id()
-        if not user_id or user_id not in users_storage:
+        if not user_id:
             return jsonify({
                 'success': False,
                 'message': 'Authentication required'
             }), 401
         
         # Ensure only landlords can create listings
-        user = users_storage.get(user_id)
-        if not user or user.get('role') != 'landlord':
-            print(f"🚫 403 CREATE_LISTING_DENIED: user_id={user_id}, role={user.get('role') if user else 'None'}")
+        user = db.query(User).filter(User.user_id == user_id).first()
+        if not user or user.role != 'landlord':
+            print(f"🚫 403 CREATE_LISTING_DENIED: user_id={user_id}, role={user.role if user else 'None'}")
             return jsonify({
                 'success': False,
                 'message': 'Create Listing is for landlords'
@@ -342,35 +406,41 @@ def create_property():
         else:
             photos = list(photos_raw) if photos_raw is not None else []
         
-        # Create property object with unique ID
-        current_time = int(time.time() * 1000)
-        expires_at = current_time + (30 * 24 * 60 * 60 * 1000)  # 30 days from now
+        # Create property with expiry 30 days from now
+        expires_at = datetime.now() + timedelta(days=30)
         
-        property_id = property_counter
-        property_data = {
-            'propertyId': property_id,  # UNIQUE ID generated
-            'userId': user_id,  # Real user ID from token
-            'title': data['title'],
-            'description': data['description'],
-            'price': data['price'],
-            'location': data['location'],
-            'photos': photos,
-            'bedrooms': data['bedrooms'],
-            'bathrooms': data['bathrooms'],
-            'propertyType': data['propertyType'],
-            'createdAt': current_time,
-            'expiresAt': expires_at,
-            'status': 'active'
-        }
+        # Parse location - store as JSONB
+        location_data = data.get('location', {})
+        if isinstance(location_data, str):
+            try:
+                location_data = json.loads(location_data)
+            except:
+                location_data = {}
         
         # Accept optional structured address fields
         for f in ['addressStreet', 'addressNumber', 'neighborhood', 'lat', 'lon']:
             if f in data:
-                property_data[f] = data[f]
+                location_data[f] = data[f]
         
-        # Store property in memory
-        properties_storage[property_id] = property_data
-        property_counter += 1
+        property_obj = Property(
+            user_id=user_id,
+            title=data['title'],
+            description=data['description'],
+            price=data['price'],
+            location=location_data,
+            photos=photos,
+            bedrooms=data['bedrooms'],
+            bathrooms=data['bathrooms'],
+            property_type=data['propertyType'],
+            expires_at=expires_at,
+            status='active'
+        )
+        
+        db.add(property_obj)
+        db.commit()
+        db.refresh(property_obj)
+        
+        property_data = property_to_dict(property_obj)
         
         return jsonify({
             'success': True,
@@ -379,24 +449,38 @@ def create_property():
         }), 201
         
     except Exception as e:
+        db.rollback()
         return jsonify({
             'success': False,
             'message': f'Property creation error: {str(e)}'
         }), 500
+    finally:
+        db.close()
 
 @app.route('/properties', methods=['GET'])
 def get_all_active_properties():
+    db = SessionLocal()
     try:
         caller_id = get_authenticated_user_id()
-        is_authenticated = bool(caller_id and caller_id in users_storage)
+        is_authenticated = bool(caller_id)
 
-        active_properties = [p for p in properties_storage.values() if is_current(p)]
+        # Query active properties
+        active_properties = db.query(Property).filter(
+            Property.status == 'active',
+            or_(Property.expires_at.is_(None), Property.expires_at > datetime.now())
+        ).all()
 
         if is_authenticated:
-            safe_props = [p if p.get('userId') == caller_id else teaser_of(p) for p in active_properties]
+            safe_props = []
+            for prop in active_properties:
+                prop_dict = property_to_dict(prop)
+                if prop.user_id == caller_id:
+                    safe_props.append(prop_dict)
+                else:
+                    safe_props.append(teaser_of(prop_dict))
             return jsonify({'success': True, 'message': 'Properties retrieved successfully', 'properties': safe_props}), 200
         else:
-            guest_props = [teaser_of(p) for p in active_properties]
+            guest_props = [teaser_of(property_to_dict(prop)) for prop in active_properties]
             return jsonify({'success': True, 'message': 'Properties retrieved successfully (guest view)', 'properties': guest_props}), 200
         
     except Exception as e:
@@ -404,6 +488,8 @@ def get_all_active_properties():
             'success': False,
             'message': f'Error retrieving properties: {str(e)}'
         }), 500
+    finally:
+        db.close()
 
 @app.route('/properties/user/<int:user_id>', methods=['GET'])
 def get_user_properties(user_id):
@@ -729,12 +815,19 @@ def get_expiring_properties(user_id):
 # Messaging Routes (authentication required for all)
 @app.route('/messages', methods=['POST'])
 def send_message():
+    db = SessionLocal()
     try:
-        global message_counter
-        
         # Extract user ID from token (sender)
         sender_id = get_authenticated_user_id()
-        if not sender_id or sender_id not in users_storage:
+        if not sender_id:
+            return jsonify({
+                'success': False,
+                'message': 'Authentication required'
+            }), 401
+        
+        # Validate sender exists
+        sender = db.query(User).filter(User.user_id == sender_id).first()
+        if not sender:
             return jsonify({
                 'success': False,
                 'message': 'Authentication required'
@@ -753,7 +846,8 @@ def send_message():
         
         # Validate receiver exists
         receiver_id = data['receiverId']
-        if receiver_id not in users_storage:
+        receiver = db.query(User).filter(User.user_id == receiver_id).first()
+        if not receiver:
             return jsonify({
                 'success': False,
                 'message': 'Receiver not found'
@@ -761,37 +855,35 @@ def send_message():
         
         # Validate property exists
         property_id = data['propertyId']
-        if property_id not in properties_storage:
+        property_obj = db.query(Property).filter(Property.property_id == property_id).first()
+        if not property_obj:
             return jsonify({
                 'success': False,
                 'message': 'Property not found'
             }), 400
         
-        # Create message
-        current_time = int(time.time() * 1000)
-        message_id = message_counter
+        # Create message in database
+        message_obj = Message(
+            sender_id=sender_id,
+            receiver_id=receiver_id,
+            property_id=property_id,
+            content=data['content'],
+            message_type=data['messageType']
+        )
         
-        message_data = {
-            'messageId': message_id,
-            'senderId': sender_id,
-            'receiverId': receiver_id,
-            'propertyId': property_id,
-            'content': data['content'],
-            'messageType': data['messageType'],
-            'sentAt': current_time,
-            'readAt': None,
-            'localId': data.get('localId')  # For offline sync support
-        }
+        db.add(message_obj)
+        db.commit()
+        db.refresh(message_obj)
         
-        # Store message
-        messages_storage[message_id] = message_data
-        message_counter += 1
+        # Convert to dict for response and push notification
+        message_data = message_to_dict(message_obj)
+        message_data['localId'] = data.get('localId')  # For offline sync support
         
         print(f"✅ Message sent: {sender_id} → {receiver_id} (Property {property_id}): {data['content']}")
         
-        # Send push notification
+        # Send push notification using UserDevice.get_active_tokens_for_user()
         try:
-            sender_name = MessagingService.get_sender_display_name(users_storage, sender_id)
+            sender_name = MessagingService.get_sender_display_name_from_db(sender_id)
             MessagingService.send_message_with_push(message_data, sender_name)
         except Exception as e:
             print(f"⚠️  Push notification failed: {e}")
@@ -800,15 +892,18 @@ def send_message():
         return jsonify({
             'success': True,
             'message': 'Message sent successfully',
-            'messageId': message_id
+            'messageId': message_obj.message_id
         }), 201
         
     except Exception as e:
+        db.rollback()
         print(f"❌ Send message error: {str(e)}")
         return jsonify({
             'success': False,
             'message': f'Send message error: {str(e)}'
         }), 500
+    finally:
+        db.close()
 
 @app.route('/messages/conversation', methods=['GET'])
 def get_conversation_messages():
@@ -1120,11 +1215,35 @@ def debug_data():
     if secret != current_app.config.get("DEBUG_SECRET", "changeme"):
         return jsonify({"error": "forbidden"}), 403
     
-    return jsonify({
-        'users': users_storage,
-        'properties': properties_storage,
-        'messages': messages_storage
-    })
+    db = SessionLocal()
+    try:
+        # Get all users
+        users = db.query(User).all()
+        users_data = {
+            user.user_id: {
+                'userId': user.user_id,
+                'email': user.email,
+                'displayName': user.display_name,
+                'role': user.role,
+                'createdAt': int(user.created_at.timestamp() * 1000) if user.created_at else None
+            } for user in users
+        }
+        
+        # Get all properties
+        properties = db.query(Property).all()
+        properties_data = {prop.property_id: property_to_dict(prop) for prop in properties}
+        
+        # Get all messages
+        messages = db.query(Message).all()
+        messages_data = {msg.message_id: message_to_dict(msg) for msg in messages}
+        
+        return jsonify({
+            'users': users_data,
+            'properties': properties_data,
+            'messages': messages_data
+        })
+    finally:
+        db.close()
 
 @app.route('/debug/users', methods=['GET'])
 def debug_users():
@@ -1133,18 +1252,23 @@ def debug_users():
     if secret != current_app.config.get("DEBUG_SECRET", "changeme"):
         return jsonify({"error": "forbidden"}), 403
     
-    return jsonify({
-        'users': [
-            {
-                'userId': user['userId'],
-                'email': user['email'],
-                'displayName': user.get('displayName', 'No Name'),
-                'role': user.get('role', 'tenant'),
-                'createdAt': user['createdAt']
-            }
-            for user in users_storage.values()
-        ]
-    })
+    db = SessionLocal()
+    try:
+        users = db.query(User).all()
+        return jsonify({
+            'users': [
+                {
+                    'userId': user.user_id,
+                    'email': user.email,
+                    'displayName': user.display_name or 'No Name',
+                    'role': user.role,
+                    'createdAt': int(user.created_at.timestamp() * 1000) if user.created_at else None
+                }
+                for user in users
+            ]
+        })
+    finally:
+        db.close()
 
 @app.route('/debug/test-push', methods=['POST'])
 def test_push_notification():

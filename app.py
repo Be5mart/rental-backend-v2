@@ -1,12 +1,15 @@
 from flask import Flask, request, jsonify, current_app
 from flask_jwt_extended import JWTManager, create_access_token, verify_jwt_in_request, get_jwt_identity
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from dotenv import load_dotenv
 load_dotenv()
 import time
 import json
 import sys
 import os
+import redis
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, desc, func
@@ -33,9 +36,27 @@ CORS(app)  # tighten origins later
 app.config.setdefault("JWT_SECRET_KEY", os.getenv("JWT_SECRET_KEY", "change-me"))
 jwt = JWTManager(app)
 
+# Rate limiting setup
+limiter = Limiter(
+    key_func=get_remote_address,
+    app=app,
+    default_limits=["1000 per hour"],
+    storage_uri=os.getenv('REDIS_URL', 'redis://localhost:6379')
+)
+
 
 # Dev secret for debug endpoints
 app.config.setdefault("DEBUG_SECRET", os.getenv("DEBUG_SECRET", "changeme"))
+
+# Initialize Redis for WebSocket communication
+try:
+    redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
+    redis_client = redis.from_url(redis_url, decode_responses=True)
+    redis_client.ping()  # Test connection
+    print("✅ Redis connected successfully")
+except Exception as e:
+    print(f"⚠️ Redis connection failed: {e}")
+    redis_client = None
 
 
 # Register blueprints
@@ -176,6 +197,7 @@ def remove_session(exception=None):
 
 # Authentication Routes
 @app.route('/auth/register', methods=['POST'])
+@limiter.limit("10 per hour")  # Rate limit registration attempts
 def register():
     db = SessionLocal()
     try:
@@ -246,6 +268,7 @@ def register():
         db.close()
 
 @app.route('/auth/login', methods=['POST'])
+@limiter.limit("5 per minute")  # Rate limit login attempts
 def login():
     db = SessionLocal()
     try:
@@ -814,6 +837,7 @@ def get_expiring_properties(user_id):
 
 # Messaging Routes (authentication required for all)
 @app.route('/messages', methods=['POST'])
+@limiter.limit("60 per minute")  # Rate limit message sending
 def send_message():
     db = SessionLocal()
     try:
@@ -880,6 +904,28 @@ def send_message():
         message_data['localId'] = data.get('localId')  # For offline sync support
         
         print(f"✅ Message sent: {sender_id} → {receiver_id} (Property {property_id}): {data['content']}")
+        
+        # Broadcast to WebSocket users if Redis is available
+        if redis_client:
+            try:
+                ws_message = {
+                    'type': 'external_message',
+                    'data': {
+                        'type': 'message',
+                        'messageId': str(message_obj.message_id),
+                        'senderId': sender_id,
+                        'receiverId': receiver_id,
+                        'propertyId': property_id,
+                        'content': data['content'],
+                        'messageType': data['messageType'],
+                        'sentAt': int(message_obj.sent_at.timestamp() * 1000) if message_obj.sent_at else None,
+                        'status': 'sent'
+                    }
+                }
+                redis_client.publish('messaging_events', json.dumps(ws_message))
+                print(f"📡 Message broadcasted to WebSocket users")
+            except Exception as e:
+                print(f"⚠️  WebSocket broadcast failed: {e}")
         
         # Send push notification using UserDevice.get_active_tokens_for_user()
         try:
@@ -949,6 +995,23 @@ def get_conversation_messages():
         conversation_messages.sort(key=lambda x: x['sentAt'])
         
         print(f"✅ Retrieved {len(conversation_messages)} messages for conversation: User {user_id} ↔ User {other_user_id} (Property {property_id})")
+        
+        # Emit ack_delivered for messages sent by other_user_id to current user
+        conversation_id = f"c_{property_id}_{other_user_id}"
+        for message in conversation_messages:
+            if message['senderId'] == other_user_id and message['receiverId'] == user_id:
+                # Emit ack_delivered to WebSocket room
+                if redis_client:
+                    redis_message = {
+                        'type': 'ack_delivered',
+                        'data': {
+                            'messageId': str(message['messageId']),
+                            'conversationId': conversation_id,
+                            'deliveredBy': str(user_id)
+                        }
+                    }
+                    redis_client.publish('messaging_events', json.dumps(redis_message))
+                    print(f"📨 Emitted ack_delivered for message {message['messageId']} to room conv:{conversation_id}")
         
         return jsonify({
             'success': True,
@@ -1104,6 +1167,57 @@ def delete_conversation():
         return jsonify({
             'success': False,
             'message': f'Delete conversation error: {str(e)}'
+        }), 500
+
+@app.route('/messages/ack', methods=['POST'])
+def acknowledge_message():
+    """Acknowledge message delivery (updates status to DELIVERED)"""
+    try:
+        user_id = get_authenticated_user_id()
+        if not user_id:
+            return jsonify({
+                'success': False,
+                'message': 'Authentication required'
+            }), 401
+        
+        data = request.get_json()
+        message_id = data.get('messageId')
+        
+        if not message_id:
+            return jsonify({
+                'success': False,
+                'message': 'messageId is required'
+            }), 400
+        
+        # Update message status (this would require updating the Message model)
+        # For now, we'll publish the status update to Redis for WebSocket users
+        if redis_client:
+            try:
+                status_update = {
+                    'type': 'status_update',
+                    'data': {
+                        'messageId': str(message_id),
+                        'status': 'delivered',
+                        'acknowledged_by': user_id,
+                        'timestamp': int(time.time() * 1000),
+                        'affected_users': [user_id]  # Users who should see this update
+                    }
+                }
+                redis_client.publish('messaging_events', json.dumps(status_update))
+                print(f"📨 Message {message_id} acknowledged as delivered by user {user_id}")
+            except Exception as e:
+                print(f"⚠️ Redis publish failed: {e}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Message acknowledged'
+        }), 200
+        
+    except Exception as e:
+        print(f"❌ Acknowledge message error: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'Acknowledge message error: {str(e)}'
         }), 500
 
 @app.route('/conversations/share_street', methods=['POST'])

@@ -13,7 +13,7 @@ FCM_ENDPOINT_TEMPLATE = "https://fcm.googleapis.com/v1/projects/{project_id}/mes
 def _chunk(lst: List[str], size: int) -> List[List[str]]:
     return [lst[i:i + size] for i in range(0, len(lst), size)]
 
-def _build_message_body(token: str, title: str, body: str, data: Dict[str, str]) -> Dict[str, Any]:
+def _build_message_body(token: str, title: str, body: str, data: Dict[str, str], collapse_key: str = None) -> Dict[str, Any]:
     msg: Dict[str, Any] = {
         "message": {
             "token": token,
@@ -21,13 +21,25 @@ def _build_message_body(token: str, title: str, body: str, data: Dict[str, str])
                 "title": title,
                 "body": body
             },
-            "data": {k: str(v) for k, v in (data or {}).items()}
+            "data": {k: str(v) for k, v in (data or {}).items()},
+            "android": {
+                "priority": "high",
+                "notification": {
+                    "click_action": "FLUTTER_NOTIFICATION_CLICK",
+                    "channel_id": "messages"
+                }
+            }
         },
         "validate_only": False
     }
+    
+    # Add collapse key for message grouping
+    if collapse_key:
+        msg["message"]["android"]["collapse_key"] = collapse_key
+    
     return msg
 
-def _send_one(token: str, title: str, body: str, data: Dict[str, str]) -> Tuple[bool, int, str]:
+def _send_one(token: str, title: str, body: str, data: Dict[str, str], collapse_key: str = None) -> Tuple[bool, int, str]:
     access_token = get_access_token()
     project_id = get_project_id()
     if not (access_token and project_id):
@@ -38,7 +50,7 @@ def _send_one(token: str, title: str, body: str, data: Dict[str, str]) -> Tuple[
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json; charset=UTF-8",
     }
-    payload = _build_message_body(token, title, body, data)
+    payload = _build_message_body(token, title, body, data, collapse_key)
     r = requests.post(url, headers=headers, data=json.dumps(payload), timeout=10)
     status = r.status_code
     if status == 200:
@@ -56,7 +68,7 @@ def _send_one(token: str, title: str, body: str, data: Dict[str, str]) -> Tuple[
     # Other errors (retryable 5xx etc.)
     return False, status, r.text[:500]
 
-def send_to_user(user_id: int, title: str, body: str, data: Dict[str, str] = None) -> Dict[str, Any]:
+def send_to_user(user_id: int, title: str, body: str, data: Dict[str, str] = None, collapse_key: str = None) -> Dict[str, Any]:
     """
     Sends a push notification to all active tokens for a user.
     Returns summary: sent, failed, errors.
@@ -74,7 +86,7 @@ def send_to_user(user_id: int, title: str, body: str, data: Dict[str, str] = Non
     # FCM v1 has no true multi-token payload; we send per token, chunked to be friendly
     for chunk in _chunk(tokens, 100):
         for tk in chunk:
-            ok, code, err = _send_one(tk, title, body, data or {})
+            ok, code, err = _send_one(tk, title, body, data or {}, collapse_key)
             if ok:
                 sent += 1
             else:
@@ -90,26 +102,30 @@ class PushService:
     @staticmethod
     def send_new_message_push(user_id: int, payload: dict) -> bool:
         """
-        Legacy entrypoint used by MessagingService.
-        Maps the old payload shape to our new send_to_user() signature.
+        Send push notification using exact contract payload schema.
+        Contract: { "type":"message_created", "conversationId":string, "messageId":string, "senderId":string, "preview":string, "sentAt":number(ms) }
         """
         # Title/body for the notification
         title = payload.get("senderName") or "New message"
         body = payload.get("preview") or "You have a new message"
 
-        # Data payload (ensure strings)
+        # Data payload using EXACT contract schema - FCM requires all values as strings
+        sent_at_ms = int(payload.get("sentAt", 0))
         data = {
-            "type": "message",
+            "type": "message_created",
             "conversationId": str(payload.get("conversationId", "")),
-            "propertyId": str(payload.get("propertyId", "")),
-            "otherUserId": str(payload.get("otherUserId", "")),
-            "senderName": str(payload.get("senderName", "")),
+            "messageId": str(payload.get("messageId", "")),
+            "senderId": str(payload.get("senderId", "")),
             "preview": str(payload.get("preview", body)),
-            "sentAt": str(payload.get("sentAt", "")),
+            "sentAt": str(sent_at_ms),  # milliseconds since epoch as string
         }
 
+        # Generate collapse key for conversation grouping (exact format)
+        conversation_id = payload.get("conversationId", "")
+        collapse_key = f"conv_{conversation_id}" if conversation_id else None
+
         # Delegate to the new implementation
-        res = send_to_user(int(user_id), title, body, data)
+        res = send_to_user(int(user_id), title, body, data, collapse_key)
         return bool(res.get("sent", 0) >= 1)
 
     @staticmethod

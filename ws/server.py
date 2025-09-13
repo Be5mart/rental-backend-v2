@@ -1,353 +1,332 @@
 """
 WebSocket server for real-time messaging using Flask-SocketIO and Redis pub/sub.
 Handles JWT authentication, room-based messaging, and message status updates.
+
+Notes:
+- This module IMPORTS the REST Flask app from app.py so HTTP + WS share one $PORT.
+- Initialize with Gunicorn+eventlet on Railway:
+    gunicorn --worker-class eventlet -w 1 --timeout 120 --bind 0.0.0.0:$PORT server:app
 """
 
 import os
 import json
 import logging
-from flask import Flask, request
-from flask_socketio import SocketIO, emit, join_room, leave_room, disconnect
-from flask_jwt_extended import JWTManager, decode_token, get_jwt_identity
-from flask_cors import CORS
-import redis
+import threading
+import time
 from datetime import datetime
-from dotenv import load_dotenv
 
-load_dotenv()
+from flask import request
+from flask_socketio import SocketIO, emit, join_room, leave_room, disconnect
+from flask_jwt_extended import decode_token
+import redis
 
-# Configure logging
+# Import the REST app (single process for HTTP + WS)
+from app import app  # <-- critical: reuse the same Flask app as the REST API
+
+# ----------------------------------------------------------------------
+# Logging
+# ----------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
-# Initialize Flask app for WebSocket
-app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('JWT_SECRET_KEY', 'change-me')
+# ----------------------------------------------------------------------
+# Redis configuration (Railway may provide rediss:// for TLS)
+# ----------------------------------------------------------------------
+redis_url = os.getenv("REDIS_URL")
+if not redis_url:
+    logger.warning("REDIS_URL not set. Cross-worker WS fan-out will be disabled.")
+    redis_client = None
+else:
+    try:
+        redis_client = redis.from_url(redis_url, decode_responses=True)
+        # optional: ping on startup
+        redis_client.ping()
+        logger.info("✅ Connected to Redis for pub/sub")
+    except Exception as e:
+        logger.error(f"⚠️ Redis connection failed at startup: {e}")
+        redis_client = None
 
-# Configure CORS for WebSocket
-CORS(app, origins="*")
-
-# Initialize JWT
-jwt = JWTManager(app)
-
-# Initialize Redis for pub/sub
-redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379')
-redis_client = redis.from_url(redis_url, decode_responses=True)
-
-# Initialize SocketIO with Redis adapter for scalability
+# ----------------------------------------------------------------------
+# Socket.IO initialization (use Redis as message queue for multi-worker/instance)
+# ----------------------------------------------------------------------
 socketio = SocketIO(
-    app, 
+    app,
     cors_allowed_origins="*",
-    async_mode='eventlet',
-    message_queue=redis_url,  # Use Redis as message queue for multi-instance support
-    logger=True,
-    engineio_logger=True
+    async_mode="eventlet",
+    message_queue=redis_url,  # None disables cross-worker fan-out
+    logger=False,
+    engineio_logger=False
 )
 
-# Store active connections: {user_id: {property_id: sid}}
+# Store active connections: {user_id: {conversation_id: {sid, connected_at}}}
 active_connections = {}
 
-def authenticate_token(token):
-    """Validate JWT token and return user_id"""
+def authenticate_token(token: str):
+    """Validate JWT token and return user_id (int) or None."""
     try:
         decoded = decode_token(token)
-        return int(decoded['sub'])  # user_id is stored in 'sub' claim
+        return int(decoded["sub"])
     except Exception as e:
         logger.error(f"Token validation failed: {e}")
         return None
 
-@socketio.on('connect')
+# ----------------------------------------------------------------------
+# Socket.IO event handlers
+# ----------------------------------------------------------------------
+@socketio.on("connect")
 def handle_connect():
-    """Handle WebSocket connection with JWT authentication"""
-    token = request.args.get('token')
-    conversation_id = request.args.get('conversationId')
-    
+    """Handle WebSocket connection with JWT authentication and room join."""
+    token = request.args.get("token")
+    conversation_id = request.args.get("conversationId")
+
     if not token or not conversation_id:
-        logger.warning(f"Missing parameters - Token: {bool(token)}, ConversationId: {bool(conversation_id)}")
-        emit('error', {'message': 'Missing required parameters: token and conversationId'})
+        logger.warning(f"Missing parameters - token:{bool(token)} conversationId:{bool(conversation_id)}")
+        emit("error", {"message": "Missing required parameters: token and conversationId"})
         disconnect()
         return
-    
-    # Authenticate user
+
     user_id = authenticate_token(token)
     if not user_id:
-        logger.warning(f"Authentication failed for token: {token[:20]}...")
-        emit('error', {'message': 'Authentication failed'})
+        logger.warning("Authentication failed on WS connect.")
+        emit("error", {"message": "Authentication failed"})
         disconnect()
         return
-    
-    # Store connection info
-    if user_id not in active_connections:
-        active_connections[user_id] = {}
-    
+
+    active_connections.setdefault(user_id, {})
     active_connections[user_id][conversation_id] = {
-        'sid': request.sid,
-        'connected_at': datetime.now().isoformat()
+        "sid": request.sid,
+        "connected_at": datetime.now().isoformat()
     }
-    
-    # Join conversation room using contract format: conv:{conversationId}
+
     room = f"conv:{conversation_id}"
     join_room(room)
-    
     logger.info(f"User {user_id} connected to room {room}")
-    
-    # Confirm connection
-    emit('connected', {
-        'status': 'connected',
-        'room': room,
-        'user_id': user_id,
-        'conversation_id': conversation_id
+
+    emit("connected", {
+        "status": "connected",
+        "room": room,
+        "user_id": user_id,
+        "conversation_id": conversation_id
     })
 
-@socketio.on('disconnect')
+@socketio.on("disconnect")
 def handle_disconnect():
-    """Handle WebSocket disconnection"""
-    # Find and remove user connection
+    """Handle WebSocket disconnection."""
     user_to_remove = None
     conversation_to_remove = None
-    
-    for user_id, conversations in active_connections.items():
-        for conversation_id, conn_info in conversations.items():
-            if conn_info['sid'] == request.sid:
-                user_to_remove = user_id
-                conversation_to_remove = conversation_id
+    for uid, conversations in active_connections.items():
+        for cid, conn_info in conversations.items():
+            if conn_info["sid"] == request.sid:
+                user_to_remove, conversation_to_remove = uid, cid
                 break
         if user_to_remove:
             break
-    
+
     if user_to_remove and conversation_to_remove:
         del active_connections[user_to_remove][conversation_to_remove]
-        if not active_connections[user_to_remove]:  # Remove user if no connections left
+        if not active_connections[user_to_remove]:
             del active_connections[user_to_remove]
         logger.info(f"User {user_to_remove} disconnected from conversation {conversation_to_remove}")
 
-@socketio.on('send_message')
+@socketio.on("send_message")
 def handle_send_message(data):
-    """Handle message sending through WebSocket with persistence and canonical ID"""
+    """
+    Handle message sending through WebSocket.
+    (Persistence is handled by REST /messages; WS path keeps fast UX for sender echo.)
+    """
     try:
-        # Extract user_id and conversation_id from the connection
+        # resolve user_id + conversation_id from active_connections
         user_id = None
         conversation_id = None
-        
         for uid, conversations in active_connections.items():
-            for cid, conn_info in conversations.items():
-                if conn_info['sid'] == request.sid:
-                    user_id = uid
-                    conversation_id = cid
+            for cid, info in conversations.items():
+                if info["sid"] == request.sid:
+                    user_id, conversation_id = uid, cid
                     break
             if user_id:
                 break
-        
+
         if not user_id or not conversation_id:
-            emit('error', {'message': 'User not authenticated or conversation not found'})
+            emit("error", {"message": "User not authenticated or conversation not found"})
             return
-        
-        # Validate required fields
-        required_fields = ['clientMessageId', 'receiverId', 'propertyId', 'content', 'messageType']
-        for field in required_fields:
-            if field not in data:
-                emit('error', {'message': f'Missing required field: {field}'})
+
+        # required fields
+        for f in ["clientMessageId", "receiverId", "propertyId", "content", "messageType"]:
+            if f not in data:
+                emit("error", {"message": f"Missing required field: {f}"})
                 return
-        
-        receiver_id = int(data['receiverId'])
-        property_id = int(data['propertyId'])
-        content = data['content']
-        message_type = data['messageType']
-        client_message_id = data['clientMessageId']
-        
-        # TODO: Persist message to database and get canonical messageId
-        # For now, we'll simulate this with a timestamp-based ID
+
+        receiver_id = int(data["receiverId"])
+        property_id = int(data["propertyId"])
+        content = data["content"]
+        message_type = data["messageType"]
+        client_message_id = data["clientMessageId"]
+
+        # Simulated canonical id (REST path generates the real message_id)
         canonical_message_id = f"msg_{int(datetime.now().timestamp() * 1000)}"
         sent_at_ms = int(datetime.now().timestamp() * 1000)
-        
-        # Emit ack_sent to sender with canonical ID
-        emit('ack_sent', {
-            'clientMessageId': client_message_id,
-            'messageId': canonical_message_id,
-            'timestamp': sent_at_ms
+
+        # Acknowledge to sender
+        emit("ack_sent", {
+            "clientMessageId": client_message_id,
+            "messageId": canonical_message_id,
+            "timestamp": sent_at_ms
         })
-        
-        # Create message data for broadcast
+
         message_data = {
-            'type': 'message_created',
-            'conversationId': conversation_id,
-            'messageId': canonical_message_id,
-            'senderId': str(user_id),
-            'receiverId': str(receiver_id),
-            'propertyId': str(property_id),
-            'content': content,
-            'messageType': message_type,
-            'sentAt': sent_at_ms
+            "type": "message",
+            "conversationId": conversation_id,
+            "messageId": canonical_message_id,
+            "senderId": str(user_id),
+            "receiverId": str(receiver_id),
+            "propertyId": str(property_id),
+            "content": content,
+            "messageType": message_type,
+            "sentAt": sent_at_ms
         }
-        
-        # Broadcast message_created to conversation room
+
+        # Broadcast to room
         room = f"conv:{conversation_id}"
-        socketio.emit('message_created', message_data, room=room)
-        
-        # Publish to Redis for other services (push notifications, etc.)
-        redis_message = {
-            'type': 'websocket_message',
-            'data': message_data
-        }
+        socketio.emit("message_created", message_data, room=room)
+
+        # Publish to Redis for other services
         if redis_client:
-            redis_client.publish('messaging_events', json.dumps(redis_message))
-        
-        logger.info(f"Message {canonical_message_id} sent from {user_id} to {receiver_id} in conversation {conversation_id}")
-        
+            try:
+                redis_client.publish("messaging_events", json.dumps({
+                    "type": "websocket_message",
+                    "data": message_data
+                }))
+            except Exception as e:
+                logger.error(f"Redis publish failed: {e}")
+
+        logger.info(f"WS message {canonical_message_id}: {user_id} → {receiver_id} in {conversation_id}")
+
     except Exception as e:
         logger.error(f"Error handling send_message: {e}")
-        emit('error', {'message': 'Failed to send message'})
+        emit("error", {"message": "Failed to send message"})
 
-@socketio.on('ping')
-def handle_ping(data):
-    """Handle heartbeat ping"""
-    emit('pong', {'timestamp': datetime.now().isoformat()})
+@socketio.on("ping")
+def handle_ping(_data):
+    emit("pong", {"timestamp": datetime.now().isoformat()})
 
-@socketio.on('message_delivered')
+@socketio.on("message_delivered")
 def handle_message_delivered(data):
-    """Handle message delivered acknowledgment"""
+    """Client-side delivery ack."""
     try:
-        message_id = data.get('messageId')
-        conversation_id = data.get('conversationId')
-        
+        message_id = data.get("messageId")
+        conversation_id = data.get("conversationId")
         if not message_id or not conversation_id:
-            emit('error', {'message': 'Missing messageId or conversationId'})
+            emit("error", {"message": "Missing messageId or conversationId"})
             return
-        
-        # Find user_id from connection
+
         user_id = None
         for uid, conversations in active_connections.items():
-            for cid, conn_info in conversations.items():
-                if conn_info['sid'] == request.sid:
+            for cid, info in conversations.items():
+                if info["sid"] == request.sid:
                     user_id = uid
                     break
             if user_id:
                 break
-        
         if not user_id:
-            emit('error', {'message': 'User not authenticated'})
+            emit("error", {"message": "User not authenticated"})
             return
-        
-        # Broadcast ack_delivered to conversation room
+
         delivered_data = {
-            'messageId': message_id,
-            'deliveredBy': str(user_id),
-            'timestamp': int(datetime.now().timestamp() * 1000)
+            "messageId": message_id,
+            "deliveredBy": str(user_id),
+            "timestamp": int(datetime.now().timestamp() * 1000)
         }
-        
         room = f"conv:{conversation_id}"
-        socketio.emit('ack_delivered', delivered_data, room=room)
-        
-        # Publish to Redis for persistence
-        redis_message = {
-            'type': 'message_delivered',
-            'data': delivered_data
-        }
+        socketio.emit("ack_delivered", delivered_data, room=room)
+
         if redis_client:
-            redis_client.publish('messaging_events', json.dumps(redis_message))
-        
-        logger.info(f"Message {message_id} delivered by user {user_id} in conversation {conversation_id}")
-        
-    except Exception as e:
-        logger.error(f"Error handling message delivered: {e}")
-        emit('error', {'message': 'Failed to mark message as delivered'})
-
-def broadcast_message_to_conversation(conversation_id, message_data):
-    """Broadcast message to conversation room"""
-    room = f"conv:{conversation_id}"
-    socketio.emit('message_created', message_data, room=room)
-    logger.info(f"Broadcasted message to conversation room {room}")
-
-def broadcast_delivery_ack(conversation_id, message_id, delivered_by):
-    """Broadcast delivery acknowledgment to conversation"""
-    delivered_data = {
-        'messageId': message_id,
-        'deliveredBy': str(delivered_by),
-        'timestamp': int(datetime.now().timestamp() * 1000)
-    }
-    
-    room = f"conv:{conversation_id}"
-    socketio.emit('ack_delivered', delivered_data, room=room)
-    logger.info(f"Broadcasted delivery ack for message {message_id} to room {room}")
-
-# Redis subscriber for external message events
-def redis_subscriber():
-    """Subscribe to Redis pub/sub for external events"""
-    pubsub = redis_client.pubsub()
-    pubsub.subscribe('messaging_events')
-    
-    for message in pubsub.listen():
-        if message['type'] == 'message':
             try:
-                event_data = json.loads(message['data'])
-                event_type = event_data.get('type')
-                
-                if event_type == 'external_message':
-                    # Message sent via REST API, broadcast to WebSocket users
-                    data = event_data['data']
-                    conversation_id = data.get('conversationId')
-                    
-                    if conversation_id:
-                        broadcast_message_to_conversation(conversation_id, data)
-                        logger.info(f"Broadcasted external message to conversation {conversation_id}")
-                        
-                elif event_type == 'ack_delivered':
-                    # Delivery acknowledgment from external source (REST API)
-                    data = event_data['data']
-                    conversation_id = data.get('conversationId')
-                    message_id = data.get('messageId')
-                    delivered_by = data.get('deliveredBy')
-                    
-                    if conversation_id and message_id and delivered_by:
-                        # Emit ack_delivered to conversation room
-                        room = f"conv:{conversation_id}"
-                        delivered_data = {
-                            'messageId': message_id,
-                            'deliveredBy': delivered_by,
-                            'timestamp': int(datetime.now().timestamp() * 1000)
-                        }
-                        socketio.emit('ack_delivered', delivered_data, room=room)
-                        logger.info(f"📨 Broadcasted ack_delivered for message {message_id} to room {room}")
-                    
+                redis_client.publish("messaging_events", json.dumps({
+                    "type": "message_delivered",
+                    "data": delivered_data | {"conversationId": conversation_id}
+                }))
             except Exception as e:
-                logger.error(f"Error processing Redis message: {e}")
+                logger.error(f"Redis publish failed: {e}")
 
-# Health check endpoint
-@app.route('/health')
-def health_check():
+    except Exception as e:
+        logger.error(f"Error handling message_delivered: {e}")
+        emit("error", {"message": "Failed to mark message as delivered"})
+
+# ----------------------------------------------------------------------
+# Pub/Sub: resilient Redis subscriber
+# ----------------------------------------------------------------------
+def broadcast_message_to_conversation(conversation_id: str, message_data: dict):
+    room = f"conv:{conversation_id}"
+    socketio.emit("message_created", message_data, room=room)
+    logger.info(f"Broadcasted message to {room}")
+
+def _handle_pubsub_message(msg: dict):
+    if msg.get("type") != "message":
+        return
+    try:
+        evt = json.loads(msg["data"])
+        et = evt.get("type")
+        data = evt.get("data") or {}
+
+        if et == "external_message":
+            conv_id = data.get("conversationId")
+            if conv_id:
+                broadcast_message_to_conversation(conv_id, data)
+        elif et == "ack_delivered":
+            conv_id = data.get("conversationId")
+            mid = data.get("messageId")
+            delivered_by = data.get("deliveredBy")
+            if conv_id and mid and delivered_by:
+                room = f"conv:{conv_id}"
+                socketio.emit("ack_delivered", {
+                    "messageId": mid,
+                    "deliveredBy": str(delivered_by),
+                    "timestamp": int(datetime.now().timestamp() * 1000)
+                }, room=room)
+    except Exception as e:
+        logger.error(f"Pub/Sub processing error: {e}")
+
+def start_redis_subscriber():
+    if not redis_client:
+        logger.warning("Redis not configured; skipping subscriber.")
+        return
+
+    def _run():
+        while True:
+            try:
+                pubsub = redis_client.pubsub(ignore_subscribe_messages=True)
+                pubsub.subscribe("messaging_events")
+                logger.info("Redis subscriber listening on 'messaging_events'")
+                for message in pubsub.listen():
+                    _handle_pubsub_message(message)
+            except Exception as e:
+                logger.error(f"Redis subscriber error: {e}; retrying in 1s")
+                time.sleep(1.0)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+# Start subscriber on import (each worker runs its own)
+start_redis_subscriber()
+
+# Optional status endpoint (avoid hard dependency on Redis)
+@app.route("/ws-status")
+def ws_status():
+    ok = True
+    try:
+        ok = bool(redis_client and redis_client.ping())
+    except Exception:
+        ok = False
     return {
-        'status': 'healthy',
-        'active_connections': len(active_connections),
-        'redis_connected': redis_client.ping()
+        "active_users": len(active_connections),
+        "redis_connected": ok,
+        "timestamp": datetime.now().isoformat()
     }
 
-# Status endpoint for monitoring
-@app.route('/status')
-def status():
-    return {
-        'active_connections': len(active_connections),
-        'total_rooms': sum(len(props) for props in active_connections.values()),
-        'redis_connected': redis_client.ping(),
-        'timestamp': datetime.now().isoformat()
-    }
-
-if __name__ == '__main__':
-    # Start Redis subscriber in background thread
-    import threading
-    subscriber_thread = threading.Thread(target=redis_subscriber, daemon=True)
-    subscriber_thread.start()
-    
-    port = int(os.environ.get('PORT', 5001))  # Different port from main app
-    logger.info(f"Starting WebSocket server on port {port}")
-    
-    # Run with eventlet for production-ready async support
-    socketio.run(
-        app, 
-        host='0.0.0.0', 
-        port=port, 
-        debug=False,
-        use_reloader=False  # Disable reloader in production
-    )
+# Local dev entry
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    logger.info(f"Starting WS server on :{port}")
+    socketio.run(app, host="0.0.0.0", port=port, debug=False, use_reloader=False)

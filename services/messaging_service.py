@@ -42,16 +42,22 @@ class MessagingService:
             
             # Generate conversation ID (you might want to use a different format)
             conversation_id = f"{property_id}_{min(sender_id, recipient_user_id)}_{max(sender_id, recipient_user_id)}"
+            message_id = message_data.get('messageId')
             
             # Prepare push notification payload
             push_payload = {
-                "conversationId": conversation_id,
-                "propertyId": str(property_id),
-                "otherUserId": str(sender_id),
-                "senderName": sender_name,
-                "preview": content[:80] if content else "New message",  # Limit preview to 80 chars
-                "sentAt": str(sent_at)
-            }
+    # required by client contract
+    "conversationId": conversation_id,
+    "messageId": str(message_id) if message_id is not None else "",
+    "senderId": str(sender_id),
+
+    # existing fields you already use
+    "propertyId": str(property_id),
+    "otherUserId": str(sender_id),
+    "senderName": sender_name,
+    "preview": (content[:80] if content else "New message"),
+    "sentAt": str(sent_at)  # milliseconds, as string
+}
             
             # Send push notification
             push_success = PushService.send_new_message_push(recipient_user_id, push_payload)

@@ -13,4 +13,5 @@ firebase-admin==6.5.0
 SQLAlchemy>=2.0
 flask-socketio==5.3.6
 redis==5.0.1
-eventlet==0.33.3
+eventlet==0.36.1
+setuptools>=70.0

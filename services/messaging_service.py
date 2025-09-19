@@ -9,6 +9,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.push_service import PushService
+from app import conversation_id_for
 
 class MessagingService:
     @staticmethod
@@ -41,7 +42,7 @@ class MessagingService:
             sent_at = message_data.get('sentAt', int(time.time() * 1000))
             
             # Generate conversation ID (you might want to use a different format)
-            conversation_id = f"{property_id}_{min(sender_id, recipient_user_id)}_{max(sender_id, recipient_user_id)}"
+            conversation_id = conversation_id_for(property_id, sender_id, recipient_user_id)
             message_id = message_data.get('messageId')
             
             # Prepare push notification payload
@@ -56,7 +57,7 @@ class MessagingService:
     "otherUserId": str(sender_id),
     "senderName": sender_name,
     "preview": (content[:80] if content else "New message"),
-    "sentAt": str(sent_at)  # milliseconds, as string
+    "sentAt": int(sent_at)
 }
             
             # Send push notification

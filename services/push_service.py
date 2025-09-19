@@ -111,17 +111,20 @@ class PushService:
 
         # Data payload using EXACT contract schema - FCM requires all values as strings
         sent_at_ms = int(payload.get("sentAt", 0))
-        data = {
-            "type": "message_created",
-            "conversationId": str(payload.get("conversationId", "")),
-            "messageId": str(payload.get("messageId", "")),
-            "senderId": str(payload.get("senderId", "")),
-            "preview": str(payload.get("preview", body)),
-            "sentAt": str(sent_at_ms),  # milliseconds since epoch as string
-        }
+data = {
+    "type": "message_created",
+    "conversationId": str(push_payload["conversationId"]),
+    "messageId": str(push_payload["messageId"]),
+    "senderId": str(push_payload["senderId"]),
+    "senderName": push_payload.get("senderName", ""),   # keep
+    "propertyId": str(push_payload["propertyId"]),      # keep
+    "otherUserId": str(push_payload["otherUserId"]),    # keep
+    "preview": push_payload["preview"],
+    "sentAt": str(push_payload["sentAt"])               # stringify for FCM data
+}
 
         # Generate collapse key for conversation grouping (exact format)
-        conversation_id = payload.get("conversationId", "")
+        conversation_id = data["conversationId"]
         collapse_key = f"conv_{conversation_id}" if conversation_id else None
 
         # Delegate to the new implementation

@@ -157,10 +157,11 @@ def handle_send_message(data):
             return
 
         # required fields
-        for f in ["clientMessageId", "receiverId", "propertyId", "content", "messageType"]:
-            if f not in data:
-                emit("error", {"message": f"Missing required field: {f}"})
-                return
+for f in ["clientMessageId", "receiverId", "propertyId", "content", "messageType"]:
+    if f not in data:
+        logger.warning(f"send_message missing '{f}' (conv={conversation_id})")
+        emit("error", {"message": f"Missing required field: {f}"})
+        return
 
         receiver_id = int(data["receiverId"])
         property_id = int(data["propertyId"])
@@ -172,12 +173,14 @@ def handle_send_message(data):
         canonical_message_id = f"msg_{int(datetime.now().timestamp() * 1000)}"
         sent_at_ms = int(datetime.now().timestamp() * 1000)
 
-        # Acknowledge to sender
-        emit("ack_sent", {
-            "clientMessageId": client_message_id,
-            "messageId": canonical_message_id,
-            "timestamp": sent_at_ms
-        })
+# Acknowledge to sender (include conversationId for unambiguous routing)
+emit("ack_sent", {
+    "conversationId": conversation_id,
+    "clientMessageId": client_message_id,
+    "messageId": canonical_message_id,
+    "timestamp": sent_at_ms
+})
+
 
         message_data = {
             "type": "message",
@@ -239,6 +242,7 @@ def handle_message_delivered(data):
 
         delivered_data = {
             "messageId": message_id,
+            "conversationId": conversation_id,
             "deliveredBy": str(user_id),
             "timestamp": int(datetime.now().timestamp() * 1000)
         }
@@ -278,17 +282,18 @@ def _handle_pubsub_message(msg: dict):
             conv_id = data.get("conversationId")
             if conv_id:
                 broadcast_message_to_conversation(conv_id, data)
-        elif et == "ack_delivered":
-            conv_id = data.get("conversationId")
-            mid = data.get("messageId")
-            delivered_by = data.get("deliveredBy")
-            if conv_id and mid and delivered_by:
-                room = f"conv:{conv_id}"
-                socketio.emit("ack_delivered", {
-                    "messageId": mid,
-                    "deliveredBy": str(delivered_by),
-                    "timestamp": int(datetime.now().timestamp() * 1000)
-                }, room=room)
+elif et == "ack_delivered":
+    conv_id = data.get("conversationId")
+    mid = data.get("messageId")
+    delivered_by = data.get("deliveredBy")
+    if conv_id and mid and delivered_by:
+        room = f"conv:{conv_id}"
+        socketio.emit("ack_delivered", {
+            "conversationId": conv_id,  # include for client-side routing
+            "messageId": mid,
+            "deliveredBy": str(delivered_by),
+            "timestamp": int(datetime.now().timestamp() * 1000)
+        }, room=room)
     except Exception as e:
         logger.error(f"Pub/Sub processing error: {e}")
 

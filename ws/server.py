@@ -254,14 +254,18 @@ def handle_message_delivered(data):
         room = f"conv:{conversation_id}"
         socketio.emit("ack_delivered", delivered_data, room=room)
 
-        if redis_client:
-            try:
-                redis_client.publish("messaging_events", json.dumps({
-                    "type": "message_delivered",
-                    "data": delivered_data | {"conversationId": conversation_id}
-                }))
-            except Exception as e:
-                logger.error(f"Redis publish failed: {e}")
+if redis_client:
+    try:
+        redis_client.publish(
+            "messaging_events",
+            json.dumps({
+                "type": "ack_delivered",
+                "data": delivered_data  # already contains conversationId
+            })
+        )
+    except Exception as e:
+        logger.error(f"Redis publish failed: {e}")
+
 
     except Exception as e:
         logger.error(f"Error handling message_delivered: {e}")
@@ -287,20 +291,28 @@ def _handle_pubsub_message(msg: dict):
             conv_id = data.get("conversationId")
             if conv_id:
                 broadcast_message_to_conversation(conv_id, data)
-elif et == "ack_delivered":
-    conv_id = data.get("conversationId")
-    mid = data.get("messageId")
-    delivered_by = data.get("deliveredBy")
-    if conv_id and mid and delivered_by:
-        room = f"conv:{conv_id}"
-        socketio.emit("ack_delivered", {
-            "conversationId": conv_id,  # include for client-side routing
-            "messageId": mid,
-            "deliveredBy": str(delivered_by),
-            "timestamp": int(datetime.now().timestamp() * 1000)
-        }, room=room)
+
+        # Accept both legacy ("message_delivered") and canonical ("ack_delivered") names
+        elif et in ("ack_delivered", "message_delivered"):
+            conv_id = data.get("conversationId")
+            mid = data.get("messageId")
+            delivered_by = data.get("deliveredBy")
+            if conv_id and mid and delivered_by:
+                room = f"conv:{conv_id}"
+                socketio.emit(
+                    "ack_delivered",
+                    {
+                        "conversationId": conv_id,
+                        "messageId": mid,
+                        "deliveredBy": str(delivered_by),
+                        "timestamp": int(datetime.now().timestamp() * 1000),
+                    },
+                    room=room,
+                )
+
     except Exception as e:
         logger.error(f"Pub/Sub processing error: {e}")
+
 
 def start_redis_subscriber():
     if not redis_client:

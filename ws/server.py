@@ -141,12 +141,12 @@ def handle_send_message(data):
     (Persistence is handled by REST /messages; WS path keeps fast UX for sender echo.)
     """
     try:
-        # resolve user_id + conversation_id from active_connections
+        # Resolve user_id + conversation_id from active_connections
         user_id = None
         conversation_id = None
         for uid, conversations in active_connections.items():
             for cid, info in conversations.items():
-                if info["sid"] == request.sid:
+                if info.get("sid") == request.sid:
                     user_id, conversation_id = uid, cid
                     break
             if user_id:
@@ -156,12 +156,13 @@ def handle_send_message(data):
             emit("error", {"message": "User not authenticated or conversation not found"})
             return
 
-        # required fields
-for f in ["clientMessageId", "receiverId", "propertyId", "content", "messageType"]:
-    if f not in data:
-        logger.warning(f"send_message missing '{f}' (conv={conversation_id})")
-        emit("error", {"message": f"Missing required field: {f}"})
-        return
+        # Required fields validation (no stray try/except; clean indentation)
+        required = ["clientMessageId", "receiverId", "propertyId", "content", "messageType"]
+        missing = [f for f in required if f not in data]
+        if missing:
+            logger.warning("send_message missing fields %s (conv=%s)", ",".join(missing), conversation_id)
+            emit("error", {"message": f"Missing required field(s): {', '.join(missing)}"})
+            return
 
         receiver_id = int(data["receiverId"])
         property_id = int(data["propertyId"])
@@ -169,19 +170,22 @@ for f in ["clientMessageId", "receiverId", "propertyId", "content", "messageType
         message_type = data["messageType"]
         client_message_id = data["clientMessageId"]
 
-        # Simulated canonical id (REST path generates the real message_id)
-        canonical_message_id = f"msg_{int(datetime.now().timestamp() * 1000)}"
+        # Temporary canonical id (REST path generates the real message_id)
         sent_at_ms = int(datetime.now().timestamp() * 1000)
+        canonical_message_id = f"msg_{sent_at_ms}"
 
-# Acknowledge to sender (include conversationId for unambiguous routing)
-emit("ack_sent", {
-    "conversationId": conversation_id,
-    "clientMessageId": client_message_id,
-    "messageId": canonical_message_id,
-    "timestamp": sent_at_ms
-})
+        # Acknowledge to sender (include conversationId for unambiguous routing)
+        emit(
+            "ack_sent",
+            {
+                "conversationId": conversation_id,
+                "clientMessageId": client_message_id,
+                "messageId": canonical_message_id,
+                "timestamp": sent_at_ms,
+            }
+        )
 
-
+        # Build the event payload
         message_data = {
             "type": "message",
             "conversationId": conversation_id,
@@ -191,7 +195,7 @@ emit("ack_sent", {
             "propertyId": str(property_id),
             "content": content,
             "messageType": message_type,
-            "sentAt": sent_at_ms
+            "sentAt": sent_at_ms,
         }
 
         # Broadcast to room
@@ -201,18 +205,19 @@ emit("ack_sent", {
         # Publish to Redis for other services
         if redis_client:
             try:
-                redis_client.publish("messaging_events", json.dumps({
-                    "type": "websocket_message",
-                    "data": message_data
-                }))
+                redis_client.publish(
+                    "messaging_events",
+                    json.dumps({"type": "websocket_message", "data": message_data})
+                )
             except Exception as e:
-                logger.error(f"Redis publish failed: {e}")
+                logger.error("Redis publish failed: %s", e)
 
-        logger.info(f"WS message {canonical_message_id}: {user_id} → {receiver_id} in {conversation_id}")
+        logger.info("WS message %s: %s → %s in %s", canonical_message_id, user_id, receiver_id, conversation_id)
 
-    except Exception as e:
-        logger.error(f"Error handling send_message: {e}")
+    except Exception:
+        logger.exception("Error handling send_message")
         emit("error", {"message": "Failed to send message"})
+
 
 @socketio.on("ping")
 def handle_ping(_data):

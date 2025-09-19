@@ -264,12 +264,13 @@ if redis_client:
             })
         )
     except Exception as e:
-        logger.error(f"Redis publish failed: {e}")
+                logger.error(f"Redis publish failed: {e}")
 
+        logger.info(f"WS message {canonical_message_id}: {user_id} → {receiver_id} in {conversation_id}")
 
     except Exception as e:
-        logger.error(f"Error handling message_delivered: {e}")
-        emit("error", {"message": "Failed to mark message as delivered"})
+        logger.error(f"Error handling send_message: {e}")
+        emit("error", {"message": "Failed to send message"})
 
 # ----------------------------------------------------------------------
 # Pub/Sub: resilient Redis subscriber

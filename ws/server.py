@@ -233,10 +233,11 @@ def handle_message_delivered(data):
             emit("error", {"message": "Missing messageId or conversationId"})
             return
 
+        # Resolve user_id from active_connections
         user_id = None
         for uid, conversations in active_connections.items():
             for cid, info in conversations.items():
-                if info["sid"] == request.sid:
+                if info.get("sid") == request.sid:
                     user_id = uid
                     break
             if user_id:
@@ -246,31 +247,30 @@ def handle_message_delivered(data):
             return
 
         delivered_data = {
+            "conversationId": conversation_id,  # keep conv id in payload
             "messageId": message_id,
-            "conversationId": conversation_id,
             "deliveredBy": str(user_id),
-            "timestamp": int(datetime.now().timestamp() * 1000)
+            "timestamp": int(datetime.now().timestamp() * 1000),
         }
+
+        # Emit to room
         room = f"conv:{conversation_id}"
         socketio.emit("ack_delivered", delivered_data, room=room)
 
-if redis_client:
-    try:
-        redis_client.publish(
-            "messaging_events",
-            json.dumps({
-                "type": "ack_delivered",
-                "data": delivered_data  # already contains conversationId
-            })
-        )
-    except Exception as e:
+        # Publish to Redis (INSIDE the function + try/except is balanced)
+        if redis_client:
+            try:
+                redis_client.publish(
+                    "messaging_events",
+                    json.dumps({"type": "ack_delivered", "data": delivered_data})
+                )
+            except Exception as e:
                 logger.error(f"Redis publish failed: {e}")
 
-        logger.info(f"WS message {canonical_message_id}: {user_id} → {receiver_id} in {conversation_id}")
-
     except Exception:
-        logger.exception(f"Error handling send_message: {e}")
-        emit("error", {"message": "Failed to send message"})
+        logger.exception("Error handling message_delivered")
+        emit("error", {"message": "Failed to process delivery ack"})
+
 
 # ----------------------------------------------------------------------
 # Pub/Sub: resilient Redis subscriber
@@ -293,7 +293,7 @@ def _handle_pubsub_message(msg: dict):
             if conv_id:
                 broadcast_message_to_conversation(conv_id, data)
 
-        # Accept both legacy ("message_delivered") and canonical ("ack_delivered") names
+        # Accept legacy ("message_delivered") and canonical ("ack_delivered")
         elif et in ("ack_delivered", "message_delivered"):
             conv_id = data.get("conversationId")
             mid = data.get("messageId")
@@ -313,6 +313,7 @@ def _handle_pubsub_message(msg: dict):
 
     except Exception as e:
         logger.error(f"Pub/Sub processing error: {e}")
+
 
 
 def start_redis_subscriber():

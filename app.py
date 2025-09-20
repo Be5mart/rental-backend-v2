@@ -18,6 +18,8 @@ from config.database import SessionLocal
 # Add backend modules to path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from services.messaging_service import MessagingService
+from services.messaging_service import conversation_id_for
+
 from routes.device_routes import device_routes
 from routes.dev_routes import dev_routes
 
@@ -179,9 +181,7 @@ def validate_role(role):
     valid_roles = ['tenant', 'landlord']
     return role_lower if role_lower in valid_roles else None
 
-def conversation_id_for(property_id: int, u1: int, u2: int) -> str:
-    a, b = sorted([int(u1), int(u2)])
-    return f"c_{int(property_id)}_{a}_{b}"
+
 
 # ----------------------------------------------------------------------
 # Basic routes / health

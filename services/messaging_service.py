@@ -10,6 +10,15 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.push_service import PushService
 
+def conversation_id_for(property_id: int, u1: int, u2: int) -> str:
+    """
+    Canonical 1:1 conversation id: c_{propertyId}_{minUserId}_{maxUserId}
+    Pure, side-effect free; safe to import anywhere.
+    """
+    a, b = sorted([int(u1), int(u2)])
+    return f"c_{int(property_id)}_{a}_{b}"
+
+
 class MessagingService:
     @staticmethod
     def send_message_with_push(message_data: dict, sender_name: str = "Someone") -> bool:
@@ -40,7 +49,6 @@ class MessagingService:
             content = message_data.get('content', '')
             sent_at = message_data.get('sentAt', int(time.time() * 1000))
             
-from app import conversation_id_for
 
             # Generate conversation ID (you might want to use a different format)
             conversation_id = conversation_id_for(property_id, sender_id, recipient_user_id)

@@ -100,36 +100,50 @@ def send_to_user(user_id: int, title: str, body: str, data: Dict[str, str] = Non
 # ---- Backward-compatibility wrapper (for legacy imports) ----
 class PushService:
     @staticmethod
-    def send_new_message_push(user_id: int, payload: dict) -> bool:
+    def send_new_message_push(push_payload: dict) -> None:
         """
-        Send push notification using exact contract payload schema.
-        Contract: { "type":"message_created", "conversationId":string, "messageId":string, "senderId":string, "preview":string, "sentAt":number(ms) }
+        Build FCM data payload for 'message_created' and send to all receiver tokens.
+        FCM data values are strings; collapse_key groups by conversation.
         """
-        # Title/body for the notification
-        title = payload.get("senderName") or "New message"
-        body = payload.get("preview") or "You have a new message"
+        try:
+            data = {
+                "type": "message_created",
+                "conversationId": str(push_payload["conversationId"]),
+                "messageId": str(push_payload["messageId"]),
+                "senderId": str(push_payload["senderId"]),
+                "senderName": push_payload.get("senderName", ""),
+                "propertyId": str(push_payload["propertyId"]),
+                "otherUserId": str(push_payload["otherUserId"]),
+                "preview": push_payload["preview"],
+                "sentAt": str(push_payload["sentAt"]),
+            }
 
-        # Data payload using EXACT contract schema - FCM requires all values as strings
-        sent_at_ms = int(payload.get("sentAt", 0))
-data = {
-    "type": "message_created",
-    "conversationId": str(push_payload["conversationId"]),
-    "messageId": str(push_payload["messageId"]),
-    "senderId": str(push_payload["senderId"]),
-    "senderName": push_payload.get("senderName", ""),   # keep
-    "propertyId": str(push_payload["propertyId"]),      # keep
-    "otherUserId": str(push_payload["otherUserId"]),    # keep
-    "preview": push_payload["preview"],
-    "sentAt": str(push_payload["sentAt"])               # stringify for FCM data
-}
+            # Correct indentation: these lines are NOT inside the dict literal
+            conversation_id = data["conversationId"]
+            collapse_key = f"conv_{conversation_id}" if conversation_id else None
 
-        # Generate collapse key for conversation grouping (exact format)
-        conversation_id = data["conversationId"]
-        collapse_key = f"conv_{conversation_id}" if conversation_id else None
+            # Lookup receiver tokens (implement your own token fetch)
+            tokens = push_payload.get("receiverTokens", [])  # e.g., from DB
+            if not tokens:
+                return
 
-        # Delegate to the new implementation
-        res = send_to_user(int(user_id), title, body, data, collapse_key)
-        return bool(res.get("sent", 0) >= 1)
+            # Build the FCM message request (v1) per-token (or use multicast)
+            for token in tokens:
+                message = {
+                    "message": {
+                        "token": token,
+                        "data": data,
+                        "android": {
+                            "collapse_key": collapse_key
+                        }
+                    }
+                }
+                # send_via_fcm should raise on failure or return response
+                PushService._send_via_fcm(message)
+
+        except Exception as e:
+            # keep logging consistent with your project style
+            logger.error("Push send failed: %s", e)
 
     @staticmethod
     def send_test_notification(user_id: int, title: str = "Test", body: str = "This is a test") -> bool:

@@ -190,6 +190,7 @@ def handle_send_message(data):
             "type": "message",
             "conversationId": conversation_id,
             "messageId": canonical_message_id,
+            "clientMessageId": client_message_id,  # ← NEW for de-dup on client
             "senderId": str(user_id),
             "receiverId": str(receiver_id),
             "propertyId": str(property_id),

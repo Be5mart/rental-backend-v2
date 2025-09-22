@@ -1,9 +1,12 @@
 # backend/services/push_service.py
 import json
+import logging
 import time
 from typing import List, Dict, Any, Tuple
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 from config.firebase import get_access_token, get_project_id, is_configured
 from models.user_device import UserDevice
@@ -129,17 +132,10 @@ class PushService:
 
             # Build the FCM message request (v1) per-token (or use multicast)
             for token in tokens:
-                message = {
-                    "message": {
-                        "token": token,
-                        "data": data,
-                        "android": {
-                            "collapse_key": collapse_key
-                        }
-                    }
-                }
-                # send_via_fcm should raise on failure or return response
-                PushService._send_via_fcm(message)
+                # Use the existing _send_one function instead of undefined _send_via_fcm
+                title = push_payload.get("senderName", "New Message")
+                body = push_payload.get("preview", "You have a new message")
+                _send_one(token, title, body, data, collapse_key)
 
         except Exception as e:
             # keep logging consistent with your project style

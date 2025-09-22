@@ -89,20 +89,8 @@ def debug_devices():
     if not _check_debug_secret():
         return jsonify({"error": "forbidden"}), 403
 
-    # Redact tokens
-    all_devices = UserDevice.get_all_devices()
-    safe = {
-        k: {
-            "user_id": v["user_id"],
-            "platform": v["platform"],
-            "is_active": v["is_active"],
-            "token_preview": (v["fcm_token"][:20] + "…") if v.get("fcm_token") else None,
-            "created_at": v["created_at"],
-            "last_seen_at": v["last_seen_at"],
-        }
-        for k, v in all_devices.items()
-    }
-    return jsonify({"success": True, "devices": safe, "count": len(safe)}), 200
+    # Simplified debug response - method get_all_devices() not implemented
+    return jsonify({"success": True, "message": "Debug endpoint temporarily disabled", "devices": {}, "count": 0}), 200
 
 @device_routes.route("/devices/debug/test-push", methods=["POST"])
 def debug_test_push():

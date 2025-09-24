@@ -50,7 +50,7 @@ class UserDevice(Base):
     # Write helpers (core + shims)
     # ----------------------------
     @staticmethod
-    def upsert(user_id: int, platform: str, token: str) -> "UserDevice":
+    def upsert(user_id: int, token: str, platform: str) -> "UserDevice":
         """
         Core upsert: ensure (token) row exists and is active for user_id/platform.
         Returns the instance.
@@ -64,7 +64,7 @@ class UserDevice(Base):
                 inst.platform = platform
                 inst.is_active = True
             else:
-                inst = UserDevice(user_id=user_id, platform=platform, token=token, is_active=True)
+                inst = UserDevice(user_id=user_id, token=token, platform=platform, is_active=True)
                 db.add(inst)
             db.commit()
             db.refresh(inst)
@@ -77,7 +77,7 @@ class UserDevice(Base):
         Wrapper to match existing route usage: returns True/False.
         """
         try:
-            _ = UserDevice.upsert(user_id=user_id, platform=platform, token=token)
+            _ = UserDevice.upsert(user_id=user_id, token=token, platform=platform)
             return True
         except Exception as e:
             # Optional: print or log e

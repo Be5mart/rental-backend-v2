@@ -173,7 +173,7 @@ def get_access_token() -> Optional[str]:
     global _CACHED_TOKEN
     token, exp_ts = _CACHED_TOKEN
     now = time.time()
-    leeway = int(os.getenv("FCM_TOKEN_LEEWAY_SECONDS", "60"))
+    leeway = int(os.getenv("FCM_TOKEN_LEEWAY_SECONDS", "160"))
 
     if token and now < (exp_ts - leeway):
         return token

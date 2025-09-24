@@ -9,8 +9,8 @@ from flask_jwt_extended import create_access_token
 from flask_jwt_extended import verify_jwt_in_request, get_jwt_identity
 from config.database import engine, Base, SessionLocal
 from routes.auth_routes import get_authenticated_user_id
-from routes.property_routes import property_to_dict
-from routes.message_routes import message_to_dict
+from services.property_service import PropertyService
+from services.messaging_service import MessageService
 from services.messaging_service import MessagingService
 from models.user import User
 from models.property import Property
@@ -84,10 +84,15 @@ def debug_data():
                 'createdAt': int(user.created_at.timestamp() * 1000) if user.created_at else None
             } for user in users
         }
+        
+        # Create service instances
+        property_service = PropertyService(db)
+        message_service = MessageService(db, None)
+        
         properties = db.query(Property).all()
-        properties_data = {prop.property_id: property_to_dict(prop) for prop in properties}
+        properties_data = {prop.property_id: property_service.property_to_dict(prop) for prop in properties}
         messages = db.query(Message).all()
-        messages_data = {msg.message_id: message_to_dict(msg) for msg in messages}
+        messages_data = {msg.message_id: message_service.message_to_dict(msg) for msg in messages}
         return jsonify({'users': users_data, 'properties': properties_data, 'messages': messages_data})
     finally:
         db.close()

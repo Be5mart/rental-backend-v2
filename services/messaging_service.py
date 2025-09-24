@@ -160,7 +160,7 @@ class MessageService(BaseService):
         super().__init__(db)
         self.redis_client = redis_client
 
-    def _message_to_dict(self, msg: Message) -> dict:
+    def message_to_dict(self, msg: Message) -> dict:
         return {
             'messageId': msg.message_id,
             'senderId': msg.sender_id,
@@ -225,7 +225,7 @@ class MessageService(BaseService):
             # Push notification
             try:
                 sender_name = MessagingService.get_sender_display_name_from_db(sender_id)
-                message_data = self._message_to_dict(message_obj)
+                message_data = self.message_to_dict(message_obj)
                 if local_id:
                     message_data['localId'] = local_id
                 MessagingService.send_message_with_push(message_data, sender_name)
@@ -254,7 +254,7 @@ class MessageService(BaseService):
             ).order_by(Message.sent_at.asc())
 
             rows = q.all()
-            conversation_messages = [self._message_to_dict(m) for m in rows]
+            conversation_messages = [self.message_to_dict(m) for m in rows]
 
             # Emit ack_delivered for messages sent by other_user -> current user
             if self.redis_client and conversation_messages:
